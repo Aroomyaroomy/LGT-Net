@@ -21,6 +21,9 @@ docker compose up build
 By default the service is hosted locally at 127.0.0.1:8000.
 
 # Inference
+
+#### Please see Downloading Pre-trained weights section first
+
 After the service is running, you can run a health check to see if model is loaded:
 ```shell
 curl.exe http://127.0.0.1:8000/health     
@@ -45,15 +48,16 @@ Flags:
 
 ---
 
-```
 # Downloading Pre-trained Weights
-Make sure to download pre-trained weights and store them exactly as the directory below. Currently this implementation only uses the zind model so you only need to download zind/best.pkl.
+
+Before the model can be loaded, you must download pre-trained weights and store them exactly as the directory below. Currently this implementation only uses the zind model so you only need to download zind/best.pkl.
 
 - [mp3d/best.pkl](https://drive.google.com/file/d/1o97oAmd-yEP5bQrM0eAWFPLq27FjUDbh/view?usp=sharing): Training on MatterportLayout dataset
 - [zind/best.pkl](https://drive.google.com/file/d/1PzBj-dfDfH_vevgSkRe5kczW0GVl_43I/view?usp=sharing): Training on ZInd dataset
 - [pano/best.pkl](https://drive.google.com/file/d/1JoeqcPbm_XBPOi6O9GjjWi3_rtyPZS8m/view?usp=sharing): Training on PanoContext(train)+Stanford2D-3D(whole) dataset
 - [s2d3d/best.pkl](https://drive.google.com/file/d/1PfJzcxzUsbwwMal7yTkBClIFgn8IdEzI/view?usp=sharing): Training on Stanford2D-3D(train)+PanoContext(whole) dataset
 - [ablation_study_full/best.pkl](https://drive.google.com/file/d/1U16TxUkvZlRwJNaJnq9nAUap-BhCVIha/view?usp=sharing): Ablation Study: Ours (full) on MatterportLayout dataset
+
 
 Make sure the pre-trained weight files are stored as follows:
 ```
