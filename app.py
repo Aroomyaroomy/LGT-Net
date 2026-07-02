@@ -1,139 +1,200 @@
-'''
-@author: Zhigang Jiang
-@time: 2022/05/23
-@description:
-'''
+"""
+@author: Zhening Hu
+@time: 2026/06/30
+@description: fastapi endpoint serving LGT-Net
+"""
 
-import gradio as gr
-import numpy as np
 import os
+import uuid
+from io import BytesIO
+
+import cv2
+import numpy as np
 import torch
-
-from PIL import Image
-
-from utils.logger import get_logger
-from config.defaults import get_config
-from inference import preprocess, run_one_inference
-from models.build import build_model
+import uvicorn
 from argparse import Namespace
-import gdown
+from contextlib import asynccontextmanager
+from functools import lru_cache
+from typing import Literal
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from PIL import Image
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from config.defaults import get_config
+from inference import preprocess, save_pred_json
+from models.build import build_model
+from postprocessing.post_process import post_process
+from utils.boundary import corners2boundaries, layout2depth
+from utils.conversion import depth2xyz
+from utils.logger import get_logger
+from utils.misc import tensor2np
+
+logger = get_logger()
 
 
-def down_ckpt(model_cfg, ckpt_dir):
-    model_ids = [
-        ['src/config/mp3d.yaml', '1o97oAmd-yEP5bQrM0eAWFPLq27FjUDbh'],
-        ['src/config/zind.yaml', '1PzBj-dfDfH_vevgSkRe5kczW0GVl_43I'],
-        ['src/config/pano.yaml', '1JoeqcPbm_XBPOi6O9GjjWi3_rtyPZS8m'],
-        ['src/config/s2d3d.yaml', '1PfJzcxzUsbwwMal7yTkBClIFgn8IdEzI'],
-        ['src/config/ablation_study/full.yaml', '1U16TxUkvZlRwJNaJnq9nAUap-BhCVIha']
-    ]
+# def down_ckpt(model_cfg, ckpt_dir):
+#     model_ids = [
+#         ['src/config/mp3d.yaml', '1o97oAmd-yEP5bQrM0eAWFPLq27FjUDbh'],
+#         ['src/config/zind.yaml', '1PzBj-dfDfH_vevgSkRe5kczW0GVl_43I'],
+#         ['src/config/pano.yaml', '1JoeqcPbm_XBPOi6O9GjjWi3_rtyPZS8m'],
+#         ['src/config/s2d3d.yaml', '1PfJzcxzUsbwwMal7yTkBClIFgn8IdEzI'],
+#         ['src/config/ablation_study/full.yaml', '1U16TxUkvZlRwJNaJnq9nAUap-BhCVIha']
+#     ]
 
-    for model_id in model_ids:
-        if model_id[0] != model_cfg:
-            continue
-        path = os.path.join(ckpt_dir, 'best.pkl')
-        if not os.path.exists(path):
-            logger.info(f"Downloading {model_id}")
-            os.makedirs(ckpt_dir, exist_ok=True)
-            gdown.download(f"https://drive.google.com/uc?id={model_id[1]}", path, False)
+#     for model_id in model_ids:
+#         if model_id[0] != model_cfg:
+#             continue
+#         path = os.path.join(ckpt_dir, 'best.pkl')
+#         if not os.path.exists(path):
+#             logger.info(f"Downloading {model_id}")
+#             os.makedirs(ckpt_dir, exist_ok=True)
+#             gdown.download(f"https://drive.google.com/uc?id={model_id[1]}", path, False)
 
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix='LGT_',
+        env_file='.env',
+        validate_default=True,
+        frozen=True,
+    )
 
-def greet(img_path, pre_processing, weight_name, post_processing, visualization, mesh_format, mesh_resolution):
-    args.pre_processing = pre_processing
-    args.post_processing = post_processing
-    if weight_name == 'mp3d':
-        model = mp3d_model
-    elif weight_name == 'zind':
-        model = zind_model
-    else:
-        logger.error("unknown pre-trained weight name")
-        raise NotImplementedError
-
-    img_name = os.path.basename(img_path).split('.')[0]
-    img = np.array(Image.open(img_path).resize((1024, 512), Image.Resampling.BICUBIC))[..., :3]
-
-    vp_cache_path = 'src/demo/default_vp.txt'
-    if args.pre_processing:
-        vp_cache_path = os.path.join('src/output', f'{img_name}_vp.txt')
-        logger.info("pre-processing ...")
-        img, vp = preprocess(img, vp_cache_path=vp_cache_path)
-
-    img = (img / 255.0).astype(np.float32)
-    run_one_inference(img, model, args, img_name,
-                      logger=logger, show=False,
-                      show_depth='depth-normal-gradient' in visualization,
-                      show_floorplan='2d-floorplan' in visualization,
-                      mesh_format=mesh_format, mesh_resolution=int(mesh_resolution))
-
-    return [os.path.join(args.output_dir, f"{img_name}_pred.png"),
-            os.path.join(args.output_dir, f"{img_name}_3d{mesh_format}"),
-            os.path.join(args.output_dir, f"{img_name}_3d{mesh_format}"),
-            vp_cache_path,
-            os.path.join(args.output_dir, f"{img_name}_pred.json")]
+    device: Literal['cuda', 'cpu'] = 'cuda'
+    config_dir: str = 'src/config/zind.yaml'
+    mesh_format: Literal['.gltf', '.glb', '.obj'] = '.obj'
+    mesh_resolution: int = 1024
+    visualize_3d: bool = False
+    output_dir: str = 'src/output'
 
 
-def get_model(args):
-    config = get_config(args)
-    down_ckpt(args.cfg, config.CKPT.DIR)
-    if ('cuda' in args.device or 'cuda' in config.TRAIN.DEVICE) and not torch.cuda.is_available():
-        logger.info(f'The {args.device} is not available, will use cpu ...')
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+def resolve_device(requested_device: str) -> str:
+    if requested_device == 'cuda' and not torch.cuda.is_available():
+        logger.info('CUDA not available, falling back to CPU')
+        return 'cpu'
+    return requested_device
+
+
+def build_model_from_settings(cfg_path: str, settings: Settings) -> torch.nn.Module:
+    device = resolve_device(settings.device)
+    legacy_cfg = Namespace(cfg=cfg_path, device=device)
+    config = get_config(legacy_cfg)
+    if device == 'cpu' and 'cuda' in config.TRAIN.DEVICE:
         config.defrost()
-        args.device = "cpu"
-        config.TRAIN.DEVICE = "cpu"
+        config.TRAIN.DEVICE = 'cpu'
         config.freeze()
     model, _, _, _ = build_model(config, logger)
+    model.eval()
     return model
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    app.state.settings = settings
+    app.state.device = resolve_device(settings.device)
+    app.state.model = build_model_from_settings(settings.config_dir, settings)
+    yield
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def get_model(request: Request) -> torch.nn.Module:
+    return request.app.state.model
+
+
+def get_device(request: Request) -> str:
+    return request.app.state.device
+
+
+# -------------------------------------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------------------
+
+
+app = FastAPI(
+    title='LGT-Net',
+    description='A GUI-less endpoint for transforming 2D panoramas into 3D room layout',
+    lifespan=lifespan,
+)
+
+
+@app.get('/health')
+def health(request: Request) -> dict:
+    model_loaded = hasattr(request.app.state, 'model') and request.app.state.model is not None
+    return {'status': 'healthy' if model_loaded else 'unhealthy', 'model_loaded': model_loaded}
+
+
+@torch.no_grad()
+@app.post('/predict')
+def predict(
+    image: UploadFile = File(...),
+    post_processing: Literal['manhattan', 'atalanta', 'original'] = Form('manhattan'),
+    pre_processing: bool = Form(True),
+    output_3d: bool = Form(False),
+    settings: Settings = Depends(get_settings),
+    model: torch.nn.Module = Depends(get_model),
+    device: str = Depends(get_device),
+):
+    if image.content_type and not image.content_type.startswith('image/'):
+        raise HTTPException(status_code=400, detail='Invalid input file format - must be an image')
+
+    raw_bytes = image.file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail='Empty image file')
+
+    job_id = uuid.uuid4().hex
+    job_dir = os.path.join(settings.output_dir, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+
+    img_array = np.array(
+        Image.open(BytesIO(raw_bytes)).resize((1024, 512), Image.Resampling.BICUBIC)
+    )[..., :3]
+
+    if pre_processing:
+        vp_cache_path = os.path.join(job_dir, f'{job_id}_vp.txt')
+        img_array, _ = preprocess(img_array, vp_cache_path=vp_cache_path)
+
+    img_array = (img_array / 255.0).astype(np.float32)
+
+    dt = model(torch.from_numpy(img_array.transpose(2, 0, 1)[None]).to(device))
+    if post_processing != 'original':
+        dt['processed_xyz'] = post_process(tensor2np(dt['depth']), type_name=post_processing)
+
+    output_xyz = dt['processed_xyz'][0] if 'processed_xyz' in dt else depth2xyz(tensor2np(dt['depth'][0]))
+    json_data = save_pred_json(output_xyz, tensor2np(dt['ratio'][0])[0])
+
+    mesh_path = None
+    if output_3d:
+        from visualization.obj3d import create_3d_obj
+        dt_boundaries = corners2boundaries(
+            tensor2np(dt['ratio'][0])[0],
+            corners_xyz=output_xyz,
+            step=None,
+            length=settings.mesh_resolution if 'processed_xyz' in dt else None,
+            visible=bool('processed_xyz' in dt),
+        )
+        dt_layout_depth = layout2depth(dt_boundaries, show=False)
+        mesh_path = os.path.join(job_dir, f'{job_id}_3d{settings.mesh_format}')
+        create_3d_obj(
+            cv2.resize(img_array, dt_layout_depth.shape[::-1]),
+            dt_layout_depth,
+            save_path=mesh_path,
+            mesh=True,
+            show=settings.visualize_3d,
+        )
+
+    return {
+        'job_id': job_id,
+        'coordinates': json_data,
+        'mesh_path': mesh_path,
+    }
+
+
 if __name__ == '__main__':
-    logger = get_logger()
-    args = Namespace(device='cuda', output_dir='src/output', visualize_3d=False, output_3d=True)
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    args.cfg = 'src/config/mp3d.yaml'
-    mp3d_model = get_model(args)
-
-    args.cfg = 'src/config/zind.yaml'
-    zind_model = get_model(args)
-
-    description = "This demo of the project " \
-                  "<a href='https://github.com/zhigangjiang/LGT-Net' target='_blank'>LGT-Net</a>. " \
-                  "It uses the Geometry-Aware Transformer Network to predict the 3d room layout of an rgb panorama."
-
-    demo = gr.Interface(fn=greet,
-                        inputs=[gr.Image(type='filepath', label='input rgb panorama', value='src/demo/pano_demo1.png'),
-                                gr.Checkbox(label='pre-processing', value=True),
-                                gr.Radio(['mp3d', 'zind'],
-                                         label='pre-trained weight',
-                                         value='mp3d'),
-                                gr.Radio(['manhattan', 'atalanta', 'original'],
-                                         label='post-processing method',
-                                         value='manhattan'),
-                                gr.CheckboxGroup(['depth-normal-gradient', '2d-floorplan'],
-                                                 label='2d-visualization',
-                                                 value=['depth-normal-gradient', '2d-floorplan']),
-                                gr.Radio(['.gltf', '.obj', '.glb'],
-                                         label='output format of 3d mesh',
-                                         value='.gltf'),
-                                gr.Radio(['128', '256', '512', '1024'],
-                                         label='output resolution of 3d mesh',
-                                         value='256'),
-                                ],
-                        outputs=[gr.Image(label='predicted result 2d-visualization', type='filepath'),
-                                 gr.Model3D(label='3d mesh reconstruction', clear_color=[1.0, 1.0, 1.0, 1.0]),
-                                 gr.File(label='3d mesh file'),
-                                 gr.File(label='vanishing point information'),
-                                 gr.File(label='layout json')],
-                        examples=[
-                            ['src/demo/pano_demo1.png',  True,  'mp3d', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/mp3d_demo1.png',  False, 'mp3d', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/mp3d_demo2.png',  False, 'mp3d', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/mp3d_demo3.png',  False, 'mp3d', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/zind_demo1.png',  True, 'zind', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/zind_demo2.png',  False, 'zind',  'atalanta', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/zind_demo3.png',  True, 'zind', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/other_demo1.png', False, 'mp3d', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                            ['src/demo/other_demo2.png', True,  'mp3d', 'manhattan', ['depth-normal-gradient', '2d-floorplan'], '.gltf', '256'],
-                        ], title='LGT-Net', allow_flagging="never", cache_examples=False, description=description)
-
-    demo.launch(debug=True, enable_queue=False)
+    uvicorn.run(app, host='0.0.0.0', port=8000)

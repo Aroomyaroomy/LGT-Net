@@ -1,0 +1,24 @@
+services:
+  lgt-net:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image:
+      lgt-net:cu110-uv
+    ports:
+      - "8000:8000"
+    environment:
+      - LGT_DEVICE=cpu
+      - LGT_CONFIG_DIR=src/config/zind.yaml
+      - LGT_OUTPUT_DIR=src/output
+    volumes:
+      - ./src/output:/app/src/output
+      - ./checkpoints:/app/checkpoints
+    command:
+      ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 120s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped

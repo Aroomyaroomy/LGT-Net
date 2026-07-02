@@ -1,3 +1,6 @@
 src/output
 checkpoints
 flagged
+.venv/
+__pycache__/
+src/inference/

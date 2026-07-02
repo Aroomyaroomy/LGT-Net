@@ -3,12 +3,12 @@
 @time: 2022/05/25
 @description: reference: https://github.com/sunset1995/PanoPlane360/blob/main/vis_planes.py
 """
-import open3d
 import numpy as np
 from utils.conversion import pixel2lonlat
 
 
 def create_3d_obj(img, depth, save_path=None, mesh=True, mesh_show_back_face=False, show=False):
+    import open3d
     assert img.shape[0] == depth.shape[0], ""
     h = img.shape[0]
     w = img.shape[1]

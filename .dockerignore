@@ -1,0 +1,37 @@
+.git
+.gitignore
+.cursor/
+.vscode/
+
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+src/output/
+src/inference/
+*.log
+*.tmp
+response*.json
+
+*.obj
+*.glb
+*.gltf
+*.ply
+
+*.ipynb
+Post-Porcessing.md
+
+
+# Docker metadata from local runs
+docker-compose.override.yml
+
+# Checkpoints: exclude everything, then keep only ZInD checkpoint tree
+checkpoints/**
+!checkpoints/SWG_Transformer_LGT_Net/
+!checkpoints/SWG_Transformer_LGT_Net/zind/
+!checkpoints/SWG_Transformer_LGT_Net/zind/**

@@ -21,7 +21,7 @@ def calc_inter_area(dt_xz, gt_xz):
     dt_area = dt_polygon.area
     gt_area = gt_polygon.area
     inter_area = dt_polygon.intersection(gt_polygon).area
-    return dt_area, gt_area, inter_area
+    return dt_area, gt_area, inter_area 
 
 
 def calc_IoU_2D(dt_xz, gt_xz):
