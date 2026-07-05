@@ -154,7 +154,7 @@ def show_alpha_floorplan(dt_xyz, side_l=512, border_color=None):
     dt_floorplan = draw_floorplan(xz=dt_xyz[..., ::2], fill_color=fill_color,
                                   border_color=border_color, side_l=side_l, show=False, center_color=[1, 0, 0, 1])
     dt_floorplan = Image.fromarray((dt_floorplan * 255).astype(np.uint8), mode='RGBA')
-    back = np.zeros([side_l, side_l, len(fill_color)], dtype=np.float)
+    back = np.zeros([side_l, side_l, len(fill_color)], dtype=np.float64)
     back[..., :] = [0.8, 0.8, 0.8, 1]
     back = Image.fromarray((back * 255).astype(np.uint8), mode='RGBA')
     iou_floorplan = Image.alpha_composite(back, dt_floorplan).convert("RGB")

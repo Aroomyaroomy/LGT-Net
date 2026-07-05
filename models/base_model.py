@@ -44,7 +44,7 @@ class BaseModule(nn.Module):
             logger.info('*'*50)
             ckpt_path = os.path.join(self.ckpt_dir, self.model_lst[0])
             logger.info(f"Load: {ckpt_path}")
-            checkpoint = torch.load(ckpt_path, map_location=torch.device(device))
+            checkpoint = torch.load(ckpt_path, map_location=torch.device(device), weights_only=False)
             self.load_state_dict(checkpoint, strict=False)
             logger.info('*'*50)
             return 0
@@ -52,13 +52,13 @@ class BaseModule(nn.Module):
         checkpoint = None
         if len(last_model_lst) > 0:
             self.last_model_path = os.path.join(self.ckpt_dir, last_model_lst[-1])
-            checkpoint = torch.load(self.last_model_path, map_location=torch.device(device))
+            checkpoint = torch.load(self.last_model_path, map_location=torch.device(device), weights_only=False)
             self.best_accuracy = checkpoint['accuracy']
             self.acc_d = checkpoint['acc_d']
 
         if len(best_model_lst) > 0:
             self.best_model_path = os.path.join(self.ckpt_dir, best_model_lst[-1])
-            best_checkpoint = torch.load(self.best_model_path, map_location=torch.device(device))
+            best_checkpoint = torch.load(self.best_model_path, map_location=torch.device(device), weights_only=False)
             self.best_accuracy = best_checkpoint['accuracy']
             self.acc_d = best_checkpoint['acc_d']
             if best:

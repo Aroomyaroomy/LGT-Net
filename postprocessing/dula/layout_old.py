@@ -47,6 +47,7 @@ def fit_layout_old(floor_xz, need_cube=False, show=False, block_eps=0.05):
             polys = polys[1]
         else:
             polys = polys[0]
+    polys = list(polys)
     poly = polys[0]
     epsilon = 0.005 * cv2.arcLength(poly, True)
     poly = cv2.approxPolyDP(poly, epsilon, True)
@@ -97,6 +98,7 @@ def fit_layout_old(floor_xz, need_cube=False, show=False, block_eps=0.05):
             pred_polys = pred_polys[1]
         else:
             pred_polys = pred_polys[0]
+    pred_polys = list(pred_polys)
 
     polygon = [(p[0][1], p[0][0]) for p in pred_polys[0][::-1]]
 

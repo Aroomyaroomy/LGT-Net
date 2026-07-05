@@ -4,3 +4,5 @@ flagged
 .venv/
 __pycache__/
 src/inference/
+.env
+.venv-cu121-test/

@@ -3,14 +3,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image:
-      lgt-net:cu110-uv
+    image: lgt-net:cu121-uv
     ports:
       - "8000:8000"
     environment:
-      - LGT_DEVICE=cpu
+      - LGT_DEVICE=cuda
       - LGT_CONFIG_DIR=src/config/zind.yaml
       - LGT_OUTPUT_DIR=src/output
+      - LGT_SECRET_KEY=${LGT_SECRET_KEY}
+      - NVIDIA_VISIBLE_DEVICES=all
+    gpus: all
     volumes:
       - ./src/output:/app/src/output
       - ./checkpoints:/app/checkpoints
@@ -18,7 +20,7 @@ services:
       ["python3", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 120s
+      interval: 30s
       timeout: 5s
       retries: 3
     restart: unless-stopped

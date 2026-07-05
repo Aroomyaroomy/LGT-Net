@@ -68,9 +68,7 @@ def build_model(config, logger):
             scheduler = None
 
         if config.AMP_OPT_LEVEL != "O0" and 'cuda' in device:
-            import apex
-            logger.info(f"use amp:{config.AMP_OPT_LEVEL}")
-            model, optimizer = apex.amp.initialize(model, optimizer, opt_level=config.AMP_OPT_LEVEL, verbosity=0)
+            logger.info(f"use native amp (AMP_OPT_LEVEL={config.AMP_OPT_LEVEL})")
         if ddp:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[config.TRAIN.DEVICE],
                                                               broadcast_buffers=True)  # use rank:0 bn

@@ -24,8 +24,6 @@ def build_criterion(config, logger):
         }
 
         criterion[sc.NAME]['loss'] = criterion[sc.NAME]['loss'].to(device)
-        if config.AMP_OPT_LEVEL != "O0" and 'cuda' in device:
-            criterion[sc.NAME]['loss'] = criterion[sc.NAME]['loss'].type(torch.float16)
 
         # logger.info(f"Build criterion:{sc.WEIGHT}_{sc.NAME}_{sc.LOSS}_{sc.WEIGHTS}")
     return criterion

@@ -43,7 +43,7 @@ def convert_ckpt():
         return
     model_path = os.path.join(ck_dir, model_paths[0])
     print(f"Loading {model_path}")
-    checkpoint = torch.load(model_path, map_location=torch.device('cuda:0'))
+    checkpoint = torch.load(model_path, map_location=torch.device('cuda:0'), weights_only=False)
     net = checkpoint['net']
     output_path = None
     if args.output_path is None:

@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+from torchvision.models import get_model_weights
 import functools
 from models.base_model import BaseModule
 
@@ -60,11 +61,17 @@ Encoder
 '''
 
 
+def _load_encoder(backbone, pretrained=True):
+    model_fn = getattr(models, backbone)
+    weights = get_model_weights(model_fn).DEFAULT if pretrained else None
+    return model_fn(weights=weights)
+
+
 class Resnet(nn.Module):
     def __init__(self, backbone='resnet50', pretrained=True):
         super(Resnet, self).__init__()
         assert backbone in ENCODER_RESNET
-        self.encoder = getattr(models, backbone)(pretrained=pretrained)
+        self.encoder = _load_encoder(backbone, pretrained)
         del self.encoder.fc, self.encoder.avgpool
 
     def forward(self, x):
@@ -98,7 +105,7 @@ class Densenet(nn.Module):
     def __init__(self, backbone='densenet169', pretrained=True):
         super(Densenet, self).__init__()
         assert backbone in ENCODER_DENSENET
-        self.encoder = getattr(models, backbone)(pretrained=pretrained)
+        self.encoder = _load_encoder(backbone, pretrained)
         self.final_relu = nn.ReLU(inplace=True)
         del self.encoder.classifier
 

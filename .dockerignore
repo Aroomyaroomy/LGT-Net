@@ -9,9 +9,13 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.venv*/
 venv/
 env/
+.uv-cache/
+.env
 
+checkpoints/
 src/output/
 src/inference/
 *.log
@@ -22,6 +26,17 @@ response*.json
 *.glb
 *.gltf
 *.ply
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.zip
+*.tar
+*.tar.gz
+*.pt
+*.pth
+*.pkl
+*.ckpt
 
 *.ipynb
 Post-Porcessing.md
@@ -29,9 +44,3 @@ Post-Porcessing.md
 
 # Docker metadata from local runs
 docker-compose.override.yml
-
-# Checkpoints: exclude everything, then keep only ZInD checkpoint tree
-checkpoints/**
-!checkpoints/SWG_Transformer_LGT_Net/
-!checkpoints/SWG_Transformer_LGT_Net/zind/
-!checkpoints/SWG_Transformer_LGT_Net/zind/**

@@ -54,6 +54,7 @@ def fit_layout(floor_xz, need_cube=False, show=False, block_eps=5):
             polys = polys[1]
         else:
             polys = polys[0]
+    polys = list(polys)
     poly = polys[0]
     epsilon = 0.005 * cv2.arcLength(poly, True)
     poly = cv2.approxPolyDP(poly, epsilon, True)
@@ -161,6 +162,7 @@ def fit_layout(floor_xz, need_cube=False, show=False, block_eps=5):
             pred_polys = pred_polys[1]
         else:
             pred_polys = pred_polys[0]
+    pred_polys = list(pred_polys)
 
     pred_polys.sort(key=lambda x: cv2.contourArea(x), reverse=True)
     pred_poly = pred_polys[0]

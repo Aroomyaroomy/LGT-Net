@@ -14,37 +14,62 @@ Overview of the two main modules to LGT-Net: feature extractor from panorama ima
 ---
 
 # Installation
-Run the following script to compose Docker:
+
+Set a secret API key before starting the service. Create a `.env` file in the project root:
+
 ```shell
-docker compose up build
+LGT_SECRET_KEY=your-secret-key-at-least-16-chars
 ```
-By default the service is hosted locally at 127.0.0.1:8000.
+
+For local development only, you can set `LGT_DEV_MODE=true` to use a built-in insecure key instead.
+
+Run the following script to build and start Docker:
+
+```shell
+docker compose up --build
+```
+
+By default the service is hosted locally at `127.0.0.1:8000`.
 
 # Inference
 
-#### Please see Downloading Pre-trained weights section first
+#### Please see Downloading Pre-trained Weights section first
 
-After the service is running, you can run a health check to see if model is loaded:
+After the service is running, you can run a health check to see if the model is loaded:
+
 ```shell
-curl.exe http://127.0.0.1:8000/health     
+curl.exe http://127.0.0.1:8000/health
 ```
 
-To predict room layout on a panorama, you can run the following script from anywhere:
+`/health` is unauthenticated and returns `200` when healthy or `503` when the model is not loaded.
+
+To predict room layout on a panorama, include the `X-API-KEY` header:
 
 ```shell
 curl.exe -s -X POST "http://127.0.0.1:8000/predict" `
+  -H "X-API-KEY: your-secret-key-at-least-16-chars" `
   -F "image=@path/to/image.jpg" `
   -F "post_processing=manhattan" `
   -F "pre_processing=true" `
   -F "output_3d=false" `
   -o image.json
 ```
+
 Flags:
-- image: the path to prediction image (either absolute or relative is fine)
-- post_processing: post_processing technique (manhattan, atalanta, original/none)
-- pre_processing: pre-draw geometry on image to improve model performance (true by default)
-- output_3d: returns 3D mesh object (false by default)
-- o: saves the output at cwd
+- `X-API-KEY`: required API key (must match `LGT_SECRET_KEY`)
+- `image`: path to the panorama image (absolute or relative)
+- `post_processing`: `manhattan`, `atalanta`, or `original`
+- `pre_processing`: pre-draw geometry on the image to improve model performance (`true` by default)
+- `output_3d`: generate a 3D mesh and return a download URL (`false` by default)
+- `-o`: save the JSON response to the current directory
+
+When `output_3d=true`, the response includes a download URL: `mesh_url` such as `/jobs/{job_id}/mesh`. You can download the mesh with:
+
+```shell
+curl.exe -H "X-API-KEY: your-secret-key-at-least-16-chars" `
+  "http://127.0.0.1:8000/jobs/{job_id}/mesh" `
+  -o room_mesh.obj
+```
 
 ---
 
