@@ -18,10 +18,12 @@ env/
 checkpoints/
 src/output/
 src/inference/
+flagged/
 *.log
 *.tmp
 response*.json
 
+investigation_material/
 *.obj
 *.glb
 *.gltf
@@ -41,6 +43,11 @@ response*.json
 *.ipynb
 Post-Porcessing.md
 
+reposition.py
+viz3d.py
+viz3d_pointcloud.py
+convert_ckpt.py
+main.py
+visualization/compare_layout_furniture.py
 
-# Docker metadata from local runs
 docker-compose.override.yml

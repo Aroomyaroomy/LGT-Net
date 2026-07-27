@@ -1,8 +1,14 @@
-src/output
-checkpoints
-flagged
-.venv/
-__pycache__/
+# runtime / local env
+src/output/
 src/inference/
+checkpoints/
+flagged/
 .env
-.venv-cu121-test/
+.venv/
+.venv*/
+__pycache__/
+
+# investigation / scratch (not part of inference service)
+investigation_material/
+*.ipynb
+Post-Porcessing.md

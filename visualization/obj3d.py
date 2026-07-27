@@ -3,15 +3,46 @@
 @time: 2022/05/25
 @description: reference: https://github.com/sunset1995/PanoPlane360/blob/main/vis_planes.py
 """
+import os
+
 import numpy as np
 from utils.conversion import pixel2lonlat
 
 
-def create_3d_obj(img, depth, save_path=None, mesh=True, mesh_show_back_face=False, show=False):
+def point_cloud_path_from_mesh_path(mesh_path):
+    root, _ = os.path.splitext(mesh_path)
+    return f'{root}.ply'
+
+
+def create_3d_obj(
+    img,
+    depth,
+    save_path=None,
+    mesh=True,
+    mesh_show_back_face=False,
+    show=False,
+    write_mesh=None,
+    write_point_cloud=None,
+):
+    """Build and optionally persist a layout mesh and/or colored point cloud.
+
+    When ``save_path`` is set and ``write_mesh`` / ``write_point_cloud`` are left
+    as ``None``, both artifacts are written (legacy behavior). Pass explicit
+    booleans to generate only what you need.
+    """
     import open3d
     assert img.shape[0] == depth.shape[0], ""
     h = img.shape[0]
     w = img.shape[1]
+
+    if write_mesh is None:
+        write_mesh = save_path is not None
+    if write_point_cloud is None:
+        write_point_cloud = save_path is not None
+
+    need_mesh = write_mesh or (show and mesh)
+    need_point_cloud = write_point_cloud or (show and not mesh)
+
     # Project to 3d
     lon = pixel2lonlat(np.array(range(w)), w=w, axis=0)[None].repeat(h, axis=0)
     lat = pixel2lonlat(np.array(range(h)), h=h, axis=1)[..., None].repeat(w, axis=1)
@@ -22,7 +53,14 @@ def create_3d_obj(img, depth, save_path=None, mesh=True, mesh_show_back_face=Fal
     pts_xyz = np.stack([x, -z, y], -1).reshape(-1, 3)
     pts_rgb = img.reshape(-1, 3)
 
-    if mesh:
+    point_cloud = None
+    if need_point_cloud:
+        point_cloud = open3d.geometry.PointCloud()
+        point_cloud.points = open3d.utility.Vector3dVector(pts_xyz)
+        point_cloud.colors = open3d.utility.Vector3dVector(pts_rgb)
+
+    triangle_mesh = None
+    if need_mesh:
         pid = np.arange(len(pts_xyz)).reshape(h, w)
         faces = np.concatenate([
             np.stack([
@@ -32,19 +70,29 @@ def create_3d_obj(img, depth, save_path=None, mesh=True, mesh_show_back_face=Fal
                 pid[1:, :-1], np.roll(pid, -1, axis=1)[1:, :-1], np.roll(pid, -1, axis=1)[:-1, :-1],
             ], -1)
         ]).reshape(-1, 3).tolist()
-        scene = open3d.geometry.TriangleMesh()
-        scene.vertices = open3d.utility.Vector3dVector(pts_xyz)
-        scene.vertex_colors = open3d.utility.Vector3dVector(pts_rgb)
-        scene.triangles = open3d.utility.Vector3iVector(faces)
+        triangle_mesh = open3d.geometry.TriangleMesh()
+        triangle_mesh.vertices = open3d.utility.Vector3dVector(pts_xyz)
+        triangle_mesh.vertex_colors = open3d.utility.Vector3dVector(pts_rgb)
+        triangle_mesh.triangles = open3d.utility.Vector3iVector(faces)
 
-    else:
-        scene = open3d.geometry.PointCloud()
-        scene.points = open3d.utility.Vector3dVector(pts_xyz)
-        scene.colors = open3d.utility.Vector3dVector(pts_rgb)
+    mesh_path = None
+    point_cloud_path = None
     if save_path:
-        open3d.io.write_triangle_mesh(save_path, scene, write_triangle_uvs=True)
+        if write_mesh:
+            open3d.io.write_triangle_mesh(save_path, triangle_mesh, write_triangle_uvs=True)
+            mesh_path = save_path
+        if write_point_cloud:
+            point_cloud_path = point_cloud_path_from_mesh_path(save_path)
+            open3d.io.write_point_cloud(point_cloud_path, point_cloud)
+
     if show:
+        scene = triangle_mesh if mesh else point_cloud
         open3d.visualization.draw_geometries([scene], mesh_show_back_face=mesh_show_back_face)
+
+    return {
+        'mesh_path': mesh_path,
+        'point_cloud_path': point_cloud_path,
+    }
 
 
 if __name__ == '__main__':

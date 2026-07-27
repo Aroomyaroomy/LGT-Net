@@ -51,7 +51,8 @@ curl.exe -s -X POST "http://127.0.0.1:8000/predict" `
   -F "image=@path/to/image.jpg" `
   -F "post_processing=manhattan" `
   -F "pre_processing=true" `
-  -F "output_3d=false" `
+  -F "output_mesh=false" `
+  -F "output_point_cloud=false" `
   -o image.json
 ```
 
@@ -60,10 +61,11 @@ Flags:
 - `image`: path to the panorama image (absolute or relative)
 - `post_processing`: `manhattan`, `atalanta`, or `original`
 - `pre_processing`: pre-draw geometry on the image to improve model performance (`true` by default)
-- `output_3d`: generate a 3D mesh and return a download URL (`false` by default)
+- `output_mesh`: generate a 3D mesh and return `mesh_url` (`false` by default)
+- `output_point_cloud`: generate a `.ply` point cloud and return `point_cloud_url` (`false` by default)
 - `-o`: save the JSON response to the current directory
 
-When `output_3d=true`, the response includes a download URL: `mesh_url` such as `/jobs/{job_id}/mesh`. You can download the mesh with:
+When either 3D flag is true, the response includes the corresponding download URL(s). Example mesh download:
 
 ```shell
 curl.exe -H "X-API-KEY: your-secret-key-at-least-16-chars" `

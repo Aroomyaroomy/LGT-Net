@@ -200,7 +200,8 @@ def predict(
     image: UploadFile = File(...),
     post_processing: Literal['manhattan', 'atalanta', 'original'] = Form('manhattan'),
     pre_processing: bool = Form(True),
-    output_3d: bool = Form(False),
+    output_mesh: bool = Form(False),
+    output_point_cloud: bool = Form(False),
     settings: Settings = Depends(get_settings),
     model: torch.nn.Module = Depends(get_model),
     device: str = Depends(get_device),
@@ -222,7 +223,7 @@ def predict(
 
     if pre_processing:
         vp_cache_path = os.path.join(job_dir, f'{job_id}_vp.txt')
-        img_array, _ = preprocess(img_array, vp_cache_path=vp_cache_path)
+        img_array, vp = preprocess(img_array, vp_cache_path=vp_cache_path)
 
     img_array = (img_array / 255.0).astype(np.float32)
 
@@ -234,7 +235,8 @@ def predict(
     json_data = save_pred_json(output_xyz, tensor2np(dt['ratio'][0])[0])
 
     mesh_url = None
-    if output_3d:
+    point_cloud_url = None
+    if output_mesh or output_point_cloud:
         from visualization.obj3d import create_3d_obj
         dt_boundaries = corners2boundaries(
             tensor2np(dt['ratio'][0])[0],
@@ -249,15 +251,21 @@ def predict(
             cv2.resize(img_array, dt_layout_depth.shape[::-1]),
             dt_layout_depth,
             save_path=mesh_path,
-            mesh=True,
+            mesh=output_mesh or not output_point_cloud,
             show=settings.visualize_3d,
+            write_mesh=output_mesh,
+            write_point_cloud=output_point_cloud,
         )
-        mesh_url = f'/jobs/{job_id}/mesh'
+        if output_mesh:
+            mesh_url = f'/jobs/{job_id}/mesh'
+        if output_point_cloud:
+            point_cloud_url = f'/jobs/{job_id}/point_cloud'
 
     return {
         'job_id': job_id,
         'coordinates': json_data,
         'mesh_url': mesh_url,
+        'point_cloud_url': point_cloud_url,
     }
 
 
@@ -279,6 +287,19 @@ def download_mesh(job_id: str, settings: Settings = Depends(get_settings)):
         media_type = 'model/gltf-binary'
 
     return FileResponse(mesh_path, media_type=media_type, filename=mesh_name)
+
+
+@app.get('/jobs/{job_id}/point_cloud', dependencies=[Depends(validate_api_key)], response_class=FileResponse)
+def download_point_cloud(job_id: str, settings: Settings = Depends(get_settings)):
+    if len(job_id) != 32 or any(c not in '0123456789abcdef' for c in job_id):
+        raise HTTPException(status_code=400, detail='Invalid job_id')
+
+    point_cloud_name = f'{job_id}_3d.ply'
+    point_cloud_path = os.path.join(settings.output_dir, job_id, point_cloud_name)
+    if not os.path.isfile(point_cloud_path):
+        raise HTTPException(status_code=404, detail='Point cloud file not found')
+
+    return FileResponse(point_cloud_path, media_type='application/octet-stream', filename=point_cloud_name)
 
 
 def clean_up_local_files(settings: BaseSettings) -> dict:
