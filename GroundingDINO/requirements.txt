@@ -1,0 +1,15 @@
+# torch/torchvision are copied from the builder stage — do not list them here.
+# Keep pins compatible with torch 2.1.x / NumPy 1.x.
+transformers>=4.30.0,<4.46.0
+addict
+yapf
+timm>=0.9.0,<1.0.16
+numpy<2
+opencv-python-headless
+supervision>=0.22.0,<0.26.0
+pycocotools
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-multipart
+pillow

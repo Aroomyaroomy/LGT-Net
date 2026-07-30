@@ -1,0 +1,26 @@
+services:
+  groundingdino:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9+PTX}
+    image: groundingdino:inference
+    container_name: groundingdino
+    working_dir: /opt/groundingdino
+    ports:
+      - "${DINO_PORT:-8001}:8001"
+    environment:
+      CUDA_HOME: /usr/local/cuda
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      DINO_CONFIG_DIR: /opt/groundingdino/groundingdino/config/GroundingDINO_SwinT_OGC.py
+      DINO_CKPT_DIR: /opt/groundingdino/weights/groundingdino_swint_ogc.pth
+      DINO_OUTPUT_DIR: /data
+      DINO_DEV_MODE: ${DINO_DEV_MODE:-true}
+      HF_HOME: /opt/hf-cache
+      LD_LIBRARY_PATH: /usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/cuda/lib64
+    volumes:
+      - ./data:/data  # job output dir
+      - ./weights:/opt/groundingdino/weights:ro
+    gpus: all
+    command: ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
