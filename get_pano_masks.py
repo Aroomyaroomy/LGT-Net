@@ -283,6 +283,8 @@ def get_mask_job_result(request_id: str, sam_base_url: str) -> dict:
         params={"requestId": request_id},
         timeout=30,
     )
+    if not response.ok:
+        print(f"  [SAM ERROR] HTTP {response.status_code}: {response.text[:500]}")
     if response.status_code == 409:
         raise RuntimeError("Job result not ready yet.")
     response.raise_for_status()
@@ -317,8 +319,23 @@ def wait_and_fetch_mask_job(
     """
     os.makedirs(output_dir, exist_ok=True)
 
+    NETWORK_RETRIES = 3
+    network_failures = 0
+
     for attempt in range(1, max_attempts + 1):
-        status = poll_mask_job_status(request_id, sam_base_url)
+        try:
+            status = poll_mask_job_status(request_id, sam_base_url)
+            network_failures = 0  # reset on success
+        except (requests.ConnectionError, requests.Timeout) as e:
+            network_failures += 1
+            if network_failures > NETWORK_RETRIES:
+                raise RuntimeError(
+                    f"Network error after {NETWORK_RETRIES} retries: {e}"
+                ) from e
+            print(f"  [SAM] network error (retry {network_failures}/{NETWORK_RETRIES}): {e}")
+            time.sleep(interval)
+            continue
+
         print(f"  [SAM] status={status} (attempt {attempt}/{max_attempts})")
 
         if status in FAILED_STATUSES:
@@ -333,15 +350,17 @@ def wait_and_fetch_mask_job(
             # Download each mask file
             for idx, mask in enumerate(result_data.get("masks", [])):
                 filename = mask.get("file_name") or f"mask_{idx}.png"
-                download_binary(mask["url"], os.path.join(output_dir, filename))
-                print(f"  [SAM] Downloaded: {filename}")
+                filepath = os.path.abspath(os.path.join(output_dir, filename))
+                download_binary(mask["url"], filepath)
+                print(f"  [SAM] Downloaded: {filepath}")
 
             # Download annotated image (if present)
             image_obj = result_data.get("image")
             if image_obj and image_obj.get("url"):
                 image_filename = image_obj.get("file_name") or "annotated.png"
-                download_binary(image_obj["url"], os.path.join(output_dir, image_filename))
-                print(f"  [SAM] Downloaded annotated image: {image_filename}")
+                filepath = os.path.abspath(os.path.join(output_dir, image_filename))
+                download_binary(image_obj["url"], filepath)
+                print(f"  [SAM] Downloaded annotated image: {filepath}")
 
             return result
 
@@ -465,7 +484,7 @@ def run_remote_mode(
             "box_prompts": box_prompts,
             "num_boxes": len(box_prompts),
         }, f, indent=2, ensure_ascii=False)
-    print(f"  [boxes] Saved to {boxes_out_path}")
+    print(f"  [boxes] Saved to {os.path.abspath(boxes_out_path)}")
 
     # Step 3: skip SAM if no objects detected
     if not box_prompts:
