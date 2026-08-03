@@ -1,0 +1,32 @@
+# Inpaint-Anything FastAPI inference service (LaMa fill path).
+#
+# From this directory:
+#   docker compose up --build
+
+services:
+  inpaint-anything:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: inpaint-anything:inference
+    container_name: inpaint-anything
+    working_dir: /opt/inpaint-anything
+    environment:
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      LAMA_CONFIG: /opt/inpaint-anything/lama/configs/prediction/default.yaml
+      LAMA_CKPT: /opt/inpaint-anything/pretrained_models/big-lama
+      TORCH_HOME: /opt/torch-cache
+      PYTHONPATH: /opt/inpaint-anything:/opt/inpaint-anything/lama
+      # app.py Settings (INPAINT_* prefix)
+      INPAINT_DEV_MODE: ${INPAINT_DEV_MODE:-true}
+      INPAINT_DEVICE: ${INPAINT_DEVICE:-cuda}
+      INPAINT_CONFIG_DIR: /opt/inpaint-anything/lama/configs/prediction/default.yaml
+      INPAINT_CKPT_DIR: /opt/inpaint-anything/pretrained_models/big-lama/
+      INPAINT_OUTPUT_DIR: /data
+    ports:
+      - "${INPAINT_PORT:-8002}:8002"
+    volumes:
+      # Host I/O for masks / inpainting outputs (mask_dir must be under here or another mount)
+      - ./data:/data
+    gpus: all
+    command: ["python", "app.py"]
