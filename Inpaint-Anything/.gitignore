@@ -1,0 +1,79 @@
+# =============================================================================
+# Keep tracked: app.py, lama_inpaint.py, Dockerfile, compose.yml, lama/, utils/,
+#               README.md, LICENSE, .dockerignore, pretrained_models/.gitkeep
+# Ignore: upstream demos, unused subsystems, local I/O, checkpoints
+# =============================================================================
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.idea/
+.vscode/
+**/.DS_Store
+~*
+
+# Notebooks
+*.ipynb
+**/.ipynb_checkpoints/
+
+# Unused upstream subsystems / demos (not used by app.py Docker inference)
+app/
+example/
+nerf/
+sttn/
+pytracking/
+segment_anything/
+script/
+weights/
+
+# Upstream CLI entrypoints not used by the FastAPI server
+__init__.py
+fill_anything.py
+remove_anything.py
+remove_anything_3d.py
+remove_anything_video.py
+replace_anything.py
+sam_segment.py
+ostrack.py
+stable_diffusion_inpaint.py
+sttn_video_inpaint.py
+lama_requirements_windows.txt
+
+# Local / generated I/O
+results/
+testing_src/
+src/
+kitchen.jpg
+kitchen/
+inpainted.png
+data/**
+!data/.gitkeep
+
+# Checkpoints (big-lama is downloaded during Docker build)
+pretrained_models/**
+!pretrained_models/.gitkeep
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+
+# Misc local artifacts
+*.log
+.torch-cache/
+torch-cache/
