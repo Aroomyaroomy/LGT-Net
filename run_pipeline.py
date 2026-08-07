@@ -71,13 +71,24 @@ SAM3D_BASE_URL = "https://ai-test.aroomy.com/api/sam3d"
 HELPER FUNCTIONS
 """
 
-def download_binary(url: str, output_path: str, headers: Optional[dict] = None) -> None:
-    """Download a binary file from a URL to a local path."""
-    response = requests.get(url, headers=headers or {}, timeout=60)
-    response.raise_for_status()
+def download_binary(url: str, output_path: str, headers: Optional[dict] = None, max_retries: int = 5) -> None:
+    """Download a binary file from a URL to a local path with retries."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "wb") as f:
-        f.write(response.content)
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, headers=headers or {}, timeout=(30, 120))
+            response.raise_for_status()
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+            return
+        except (requests.ConnectionError, requests.Timeout,
+                requests.exceptions.SSLError) as e:
+            last_error = e
+            wait = 2 ** attempt
+            print(f"  [download] retry {attempt}/{max_retries} in {wait}s: {e}")
+            time.sleep(wait)
+    raise last_error
 
 
 def load_image_bytes(image_url_or_path: str) -> tuple[bytes, str, str]:
@@ -276,6 +287,7 @@ def run_sam(
         box_prompts = load_box_prompts_from_json(boxes_path, min_score=min_score)
     else:
         box_prompts = load_box_prompts_from_json(boxes, min_score=min_score)
+    print(f"    Loaded {len(box_prompts)} box prompts for SAM")
 
     print("\n    Submitting SAM segmentation job ...")
     request_id = submit_mask_job(image_url, sam_base_url, box_prompts)

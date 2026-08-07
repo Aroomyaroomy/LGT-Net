@@ -65,13 +65,24 @@ def get_image_frame(image_url: str) -> tuple[int, int]:
     return image.size  # (width, height)
 
 
-def download_binary(url: str, output_path: str) -> None:
-    """Download a binary file from a URL to a local path."""
-    response = requests.get(url, timeout=60)
-    response.raise_for_status()
+def download_binary(url: str, output_path: str, max_retries: int = 5) -> None:
+    """Download a binary file from a URL to a local path with retries."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    with open(output_path, "wb") as f:
-        f.write(response.content)
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, timeout=(30, 120))
+            response.raise_for_status()
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+            return
+        except (requests.ConnectionError, requests.Timeout,
+                requests.exceptions.SSLError) as e:
+            last_error = e
+            wait = 2 ** attempt
+            print(f"  [download] retry {attempt}/{max_retries} in {wait}s: {e}")
+            time.sleep(wait)
+    raise last_error
 
 
 # ---------------------------------------------------------------------------

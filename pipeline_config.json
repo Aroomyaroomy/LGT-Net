@@ -1,7 +1,7 @@
 {
   "image_url": "https://this-is-a-valid-bucket-name-651697298829-ap-northeast-1-an.s3.ap-northeast-1.amazonaws.com/living_room.jpg",
   "root_dir": "living_room_test",
-  "api_key": "dev-only-insecure-key",
+  "api_key": "dev-local-test-key-16chars",
   "dino": {
     "service_url": "http://localhost:8001",
     "text_prompt": "soft . chair . cabinet . utensils . table . lamp ",
