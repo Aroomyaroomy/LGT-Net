@@ -9,7 +9,6 @@ import secrets
 import uuid
 from io import BytesIO
 import shutil
-import glob
 import asyncio
 import datetime
 import torch
@@ -195,8 +194,9 @@ def health(request: Request):
 @app.post('/predict', dependencies=[Depends(validate_api_key)])
 async def predict(
     image: UploadFile = File(...),
-    mask_dir: str = Form(...),
+    masks: List[UploadFile] = File(...),
     crop_size: int = Form(default=512),
+    num_masks: Optional[int] = Form(default=None),
     model: torch.nn.Module = Depends(get_model),
     device: str = Depends(get_device),
     settings: Settings = Depends(get_settings),
@@ -206,15 +206,36 @@ async def predict(
     if not image_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty image upload")
 
-    mask_paths = sorted(glob.glob(os.path.join(mask_dir, 'mask_*.png')))
-    if len(mask_paths) == 0:
-        LOGGER.error(f"No valid mask files found in {mask_dir}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid mask files found")
+    if not masks:
+        LOGGER.error("ZERO valid masks uploaded")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid mask files")
+
+    sorted_masks = sorted(masks, key=lambda m: m.filename or "")
+    if num_masks is not None:
+        sorted_masks = sorted_masks[:num_masks]
 
     job_id = uuid.uuid4().hex
     job_dir = os.path.join(settings.output_dir, job_id)
-    os.makedirs(job_dir, exist_ok=True)
+    masks_dir = os.path.join(job_dir, "masks")
+    os.makedirs(masks_dir, exist_ok=True)
     save_path = os.path.join(job_dir, 'inpainted.png')
+
+    mask_paths: List[str] = []
+    for idx, mask_file in enumerate(sorted_masks):
+        mask_bytes = await mask_file.read()
+        if not mask_bytes:
+            continue
+        filename = os.path.basename(mask_file.filename or f"mask_{idx}.png")
+        if not filename.lower().endswith(".png"):
+            filename = f"mask_{idx}.png"
+        mask_path = os.path.join(masks_dir, filename)
+        with open(mask_path, "wb") as f:
+            f.write(mask_bytes)
+        mask_paths.append(mask_path)
+
+    if not mask_paths:
+        LOGGER.error("ZERO valid masks uploaded")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid mask files")
 
     try:
         # Hold the lock only around inference so /health and downloads stay responsive.

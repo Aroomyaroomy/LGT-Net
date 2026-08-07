@@ -4,6 +4,7 @@
 @description: fastapi endpoint serving LGT-Net
 """
 
+import json
 import os
 import secrets
 import uuid
@@ -20,7 +21,8 @@ import uvicorn
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import Literal, Optional
+from pathlib import Path
+from typing import List, Literal, Optional
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, Header, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -32,6 +34,7 @@ from config.defaults import get_config
 from inference import preprocess, save_pred_json
 from models.build import build_model
 from postprocessing.post_process import post_process
+from reposition import placements_from_mask_dir
 from utils.boundary import corners2boundaries, layout2depth
 from utils.conversion import depth2xyz
 from utils.logger import get_logger
@@ -202,6 +205,7 @@ def predict(
     pre_processing: bool = Form(True),
     output_mesh: bool = Form(False),
     output_point_cloud: bool = Form(False),
+    masks: Optional[List[UploadFile]] = File(None),
     settings: Settings = Depends(get_settings),
     model: torch.nn.Module = Depends(get_model),
     device: str = Depends(get_device),
@@ -217,13 +221,22 @@ def predict(
     job_dir = os.path.join(settings.output_dir, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
+    mask_dir = None
+    if masks:
+        mask_dir = Path(job_dir) / 'masks'
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        for i, mask in enumerate(sorted(masks, key=lambda m: m.filename or '')):
+            name = Path(mask.filename or f'mask_{i}.png').name
+            (mask_dir / name).write_bytes(mask.file.read())
+
     img_array = np.array(
         Image.open(BytesIO(raw_bytes)).resize((1024, 512), Image.Resampling.BICUBIC)
     )[..., :3]
 
+    vp_cache_path = None
     if pre_processing:
         vp_cache_path = os.path.join(job_dir, f'{job_id}_vp.txt')
-        img_array, vp = preprocess(img_array, vp_cache_path=vp_cache_path)
+        img_array, _ = preprocess(img_array, vp_cache_path=vp_cache_path)
 
     img_array = (img_array / 255.0).astype(np.float32)
 
@@ -233,6 +246,18 @@ def predict(
 
     output_xyz = dt['processed_xyz'][0] if 'processed_xyz' in dt else depth2xyz(tensor2np(dt['depth'][0]))
     json_data = save_pred_json(output_xyz, tensor2np(dt['ratio'][0])[0])
+
+    placements = None
+    if mask_dir is not None:
+        placements = placements_from_mask_dir(
+            mask_dir,
+            json_data,
+            depth=tensor2np(dt['depth'][0]),
+            do_manhattan=pre_processing,
+            vp_cache_path=vp_cache_path,
+        )
+        with open(os.path.join(job_dir, f'{job_id}_placements.json'), 'w', encoding='utf-8') as f:
+            json.dump({'job_id': job_id, 'placements': placements}, f, indent=2)
 
     mesh_url = None
     point_cloud_url = None
@@ -264,6 +289,7 @@ def predict(
     return {
         'job_id': job_id,
         'coordinates': json_data,
+        'placements': placements,
         'mesh_url': mesh_url,
         'point_cloud_url': point_cloud_url,
     }

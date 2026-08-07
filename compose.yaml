@@ -10,7 +10,7 @@ services:
       - LGT_DEVICE=cuda
       - LGT_CONFIG_DIR=src/config/zind.yaml
       - LGT_OUTPUT_DIR=src/output
-      - LGT_SECRET_KEY=${LGT_SECRET_KEY}
+      - LGT_DEV_MODE=${LGT_DEV_MODE:-true}
       - NVIDIA_VISIBLE_DEVICES=all
     gpus: all
     volumes:

@@ -31,7 +31,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --index-strategy unsafe-best-match \
     -r /tmp/requirements-no-torch.txt
 
-COPY app.py inference.py /app/
+COPY app.py inference.py reposition.py /app/
 COPY config /app/config
 COPY dataset /app/dataset
 COPY evaluation /app/evaluation

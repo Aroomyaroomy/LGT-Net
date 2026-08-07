@@ -43,7 +43,6 @@ investigation_material/
 *.ipynb
 Post-Porcessing.md
 
-reposition.py
 viz3d.py
 viz3d_pointcloud.py
 convert_ckpt.py

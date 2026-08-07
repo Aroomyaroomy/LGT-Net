@@ -1,0 +1,50 @@
+{
+  "image_url": "",
+  "root_dir": ".",
+  "api_key": null,
+  "dino": {
+    "service_url": "http://localhost:8001",
+    "text_prompt": "sofa. chair. table. cabinet. kitchen utensils.",
+    "box_threshold": 0.3,
+    "text_threshold": 0.25,
+    "visualize": false,
+    "download_boxes": false,
+    "token_spans": null
+  },
+  "sam": {
+    "service_url": "https://ai-test.aroomy.com/api/sam3d/masks",
+    "min_score": null,
+    "poll_interval": 5,
+    "poll_max_attempts": 20
+  },
+  "sam3d": {
+    "service_url": "https://ai-test.aroomy.com/api/sam3d",
+    "furniture_prompt": "furniture",
+    "export_textured_glb": true,
+    "poll_interval": 15,
+    "poll_max_attempts": 120
+  },
+  "inpaint": {
+    "service_url": "http://localhost:8002",
+    "crop_size": 512,
+    "num_masks": null
+  },
+  "lgt_net": {
+    "service_url": "http://localhost:8000",
+    "post_processing": "manhattan",
+    "pre_processing": true,
+    "output_mesh": true,
+    "output_point_cloud": false,
+    "mesh_format": ".obj",
+    "upload_masks": true
+  },
+  "visualize": {
+    "enabled": true,
+    "show": true,
+    "show_ground_grid": true,
+    "show_coordinate_frame": true,
+    "room_transparency": 0.4,
+    "save_screenshot": null,
+    "verbose": true
+  }
+}

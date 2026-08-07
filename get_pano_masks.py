@@ -79,24 +79,29 @@ def download_binary(url: str, output_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 def load_box_prompts_from_json(
-    boxes_json_path: str,
+    boxes_json: str | dict,
     min_score: Optional[float] = None,
 ) -> list[dict]:
     """
-    Extract box_prompts from a GroundingDINO boxes.json file.
+    Extract box_prompts from a GroundingDINO boxes.json file or parsed dict.
 
     Prefers the pre-formatted ``box_prompts`` field when available;
     otherwise falls back to extracting ``box`` from each entry in ``detections``.
 
     Args:
-        boxes_json_path: Path to the boxes.json file.
-        min_score:       Minimum confidence score; detections below this are filtered out.
+        boxes_json: Path to a boxes.json file, or an already-parsed boxes dict.
+        min_score:  Minimum confidence score; detections below this are filtered out.
 
     Returns:
         List of box_prompt dicts, each with keys xMin, yMin, xMax, yMax (int).
     """
-    with open(boxes_json_path, encoding="utf-8") as f:
-        data = json.load(f)
+    if isinstance(boxes_json, dict):
+        data = boxes_json
+        source = "<dict>"
+    else:
+        with open(boxes_json, encoding="utf-8") as f:
+            data = json.load(f)
+        source = boxes_json
 
     # Prefer pre-formatted box_prompts
     if "box_prompts" in data and min_score is None:
@@ -124,7 +129,7 @@ def load_box_prompts_from_json(
         box_prompts.append(prompt)
 
     if not box_prompts:
-        raise ValueError(f"No valid box prompts found in {boxes_json_path}")
+        raise ValueError(f"No valid box prompts found in {source}")
 
     return box_prompts
 
