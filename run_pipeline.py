@@ -5,11 +5,18 @@ import glob
 import json
 import os
 import re
+import sys
+import numpy as np
+import requests
 from typing import Optional, List, Literal
 from urllib.parse import urlparse
 
-import numpy as np
-import requests
+# Catches errors from Open3D caused by Chinese text
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 from get_pano_masks import (
     DEFAULT_POLL_INTERVAL,
@@ -19,9 +26,16 @@ from get_pano_masks import (
     load_box_prompts_from_json,
 )
 from gen_furniture_3d import wait_and_fetch_3d_job, submit_3d_job
+from reposition import (
+    json_frame_to_obj3d,
+    load_sam3d_metadata,
+    merge_sam3d_orientations_into_placements,
+    placement_to_obj3d_frame,
+)
 from visualization.compare_layout_furniture import (
     FURNITURE_COLORS,
     ROOM_DEFAULT_COLOR,
+    align_furniture_to_room,
     apply_uniform_color,
     create_coordinate_frame,
     create_ground_grid,
@@ -30,7 +44,6 @@ from visualization.compare_layout_furniture import (
     set_room_transparency,
     transform_mesh,
 )
-
 
 
 """
@@ -473,7 +486,9 @@ def run_lgt_net(
 
 
 def _mesh_path_for_mask(furniture_dir: str, mask_name: str) -> Optional[str]:
-    """Map ``mask_N.png`` -> ``furniture_dir/mesh_N.{glb,ply,obj}`` if present."""
+    """Maps masks to their corresponding 3D mesh files in the furniture directory
+        mask_N.png -> furniture_dir/mesh_N.{glb,ply,obj}
+     """
     match = re.fullmatch(r"mask_(\d+)\.png", os.path.basename(mask_name), flags=re.IGNORECASE)
     if not match:
         return None
@@ -605,6 +620,26 @@ def run_pipeline_from_config(config: dict) -> dict:
         f"layout mesh saved"
     )
 
+    # Hybrid pose: LGT translation + SAM3D upright/yaw when metadata exists.
+    metadata_path = os.path.join(object_dir, "metadata.json")
+    if os.path.isfile(metadata_path) and lgt_net_result.get("placements"):
+        merged = merge_sam3d_orientations_into_placements(
+            lgt_net_result["placements"], metadata_path
+        )
+        lgt_net_result = {**lgt_net_result, "placements": merged}
+        placements_path = lgt_net_result.get("placements_path")
+        if placements_path:
+            with open(placements_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "job_id": lgt_net_result.get("job_id"),
+                        "placements": merged,
+                        "orientation_source": "sam3d_hybrid",
+                    },
+                    f,
+                    indent=2,
+                )
+
     viz_geometries = None
     if bool(viz_cfg.get("enabled", True)):
         viz_geometries = visualize_placed_furniture(
@@ -638,11 +673,22 @@ def visualize_placed_furniture(
     show_coordinate_frame: bool = True,
     room_transparency: float = 0.4,
     save_screenshot: Optional[str] = None,
+    snap_to_floor: bool = True,
     verbose: bool = True,
 ) -> Optional[List]:
     """
-    Apply LGT-Net placement translation/rotation to SAM3D meshes and visualize
-    them together with the predicted layout mesh.
+    Apply LGT-Net placement translation and orientation to SAM3D meshes and
+    visualize them with the predicted layout mesh.
+
+    Orientation preference:
+      1) ``placement.rotation.source == "sam3d"`` (already in obj3d frame)
+      2) else ``furniture_dir/metadata.json`` SAM3D quaternion hybrid
+      3) else wall-heuristic rotation from LGT (xyz2json → obj3d remap)
+
+    Translation always comes from LGT and is remapped xyz2json → obj3d.
+    When ``snap_to_floor`` is True (default), freestanding meshes are raised /
+    lowered after posing so their AABB bottom sits on the placement floor
+    plane (SAM3D pivots are usually mesh-centered).
 
     Uses helpers from ``visualization.compare_layout_furniture``.
 
@@ -654,6 +700,7 @@ def visualize_placed_furniture(
         show_coordinate_frame: Draw RGB axes.
         room_transparency: Room wall opacity blend in ``[0, 1]``.
         save_screenshot: Optional path to capture a still after display setup.
+        snap_to_floor: Snap freestanding AABB bottoms to the floor after pose.
         verbose: Print load / placement progress.
 
     Returns:
@@ -670,6 +717,20 @@ def visualize_placed_furniture(
 
     if not room_path and not placements:
         raise ValueError("lgt_net_result has neither mesh_path nor placements")
+
+    metadata_path = os.path.join(furniture_dir, "metadata.json")
+    sam3d_meta = None
+    if os.path.isfile(metadata_path):
+        try:
+            sam3d_meta = load_sam3d_metadata(metadata_path)
+            placements = merge_sam3d_orientations_into_placements(placements, sam3d_meta)
+            if verbose:
+                print(
+                    f"  [VIZ] SAM3D hybrid orientations from {os.path.abspath(metadata_path)}"
+                )
+        except Exception as exc:
+            if verbose:
+                print(f"  [VIZ] SAM3D metadata unused ({exc})")
 
     geometries: List = []
 
@@ -714,16 +775,40 @@ def visualize_placed_furniture(
             rot_matrix = np.asarray(rotation["matrix"], dtype=np.float64)
         translation_vec = np.asarray(translation, dtype=np.float64).reshape(3)
 
-        # Place object-local mesh into the LGT / layoutPoints frame.
+        # Translations are always xyz2json → obj3d. SAM3D rotations are already
+        # authored in the obj3d / Open3D Y-up frame; wall heuristics are not.
+        translation_vec = json_frame_to_obj3d(translation_vec)
+        if rot_matrix is not None and not (
+            isinstance(rotation, dict) and rotation.get("frame") == "obj3d"
+        ):
+            _, rot_matrix = placement_to_obj3d_frame(
+                np.zeros(3, dtype=np.float64), rot_matrix
+            )
+
         transform_mesh(mesh, translation=translation_vec, rotation=rot_matrix)
+
+        # Placement puts the mesh origin on the floor; SAM3D GLBs are usually
+        # centered, so half the body would clip below the floor. Snap the
+        # post-pose AABB bottom onto the contact plane for freestanding items.
+        snapped = False
+        if snap_to_floor and placement.get("surface") != "wall":
+            floor_y = float(translation_vec[1])
+            before_min = float(mesh.get_axis_aligned_bounding_box().min_bound[1])
+            align_furniture_to_room(mesh, floor_y=floor_y)
+            after_min = float(mesh.get_axis_aligned_bounding_box().min_bound[1])
+            snapped = abs(after_min - before_min) > 1e-6
+
         geometries.append(mesh)
         placed += 1
         if verbose:
             yaw = rotation.get("yaw") if isinstance(rotation, dict) else None
+            src = rotation.get("source") if isinstance(rotation, dict) else None
             yaw_str = f", yaw={yaw:.3f}" if isinstance(yaw, (int, float)) else ""
+            src_str = f", ori={src}" if src else ""
+            snap_str = ", floor_snap" if snapped else ""
             print(
                 f"  [VIZ] placed {os.path.basename(mesh_path)} "
-                f"t={translation_vec.tolist()}{yaw_str}"
+                f"t={translation_vec.tolist()}{yaw_str}{src_str}{snap_str}"
             )
 
     if not geometries:

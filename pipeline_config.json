@@ -1,10 +1,10 @@
 {
-  "image_url": "",
-  "root_dir": ".",
-  "api_key": null,
+  "image_url": "https://this-is-a-valid-bucket-name-651697298829-ap-northeast-1-an.s3.ap-northeast-1.amazonaws.com/living_room.jpg",
+  "root_dir": "living_room_test",
+  "api_key": "dev-only-insecure-key",
   "dino": {
     "service_url": "http://localhost:8001",
-    "text_prompt": "sofa. chair. table. cabinet. kitchen utensils.",
+    "text_prompt": "soft . chair . cabinet . utensils . table . lamp ",
     "box_threshold": 0.3,
     "text_threshold": 0.25,
     "visualize": false,
@@ -40,11 +40,11 @@
   },
   "visualize": {
     "enabled": true,
-    "show": true,
+    "show": false,
     "show_ground_grid": true,
     "show_coordinate_frame": true,
     "room_transparency": 0.4,
-    "save_screenshot": null,
+    "save_screenshot": "living_room_test/compare_layout_furniture.png",
     "verbose": true
   }
 }

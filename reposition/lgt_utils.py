@@ -1,131 +1,7 @@
-import os
-
 import cv2
 import numpy as np
 
-from pathlib import Path
-from PIL import Image
 from utils.conversion import pixel2uv, uv2lonlat, lonlat2xyz
-from inference import preprocess
-
-
-def get_masks(mask_dir: Path) -> list[Path]:
-    if not mask_dir.is_dir():
-        raise NotADirectoryError(f"The {mask_dir} is not a directory")
-
-    mask_paths = []
-    for path in mask_dir.iterdir():
-        if path.name.endswith('.png') and path.name.startswith('mask_'):
-            mask_paths.append(path)
-
-    return sorted(mask_paths, key=lambda x: int(x.stem.split('_')[1]))
-
-
-def load_aligned_binary_mask(
-    path: Path,
-    do_manhattan: bool = True,
-    vp_cache_path: str = None,
-) -> np.ndarray:
-    """
-    Load a mask_*.png, resize to the LGT pano size, optionally apply the same
-    VP rotation as the panorama (via vp_cache_path written by preprocess), and
-    return a 2D boolean foreground mask.
-    """
-    img = np.array(Image.open(path).resize((1024, 512), Image.Resampling.NEAREST))
-    if img.ndim == 2:
-        rgb = np.stack([img, img, img], axis=-1)
-    else:
-        rgb = img[..., :3]
-
-    if do_manhattan:
-        if not vp_cache_path or not os.path.exists(vp_cache_path):
-            raise ValueError(
-                "do_manhattan requires an existing vp_cache_path from panorama preprocess"
-            )
-        rgb, _ = preprocess(rgb, vp_cache_path=vp_cache_path)
-
-    gray = rgb.mean(axis=-1).astype(np.float32)
-    if gray.max() > 1.0:
-        gray = gray / 255.0
-    return gray > 0.5
-
-
-def preprocess_masks(
-    masks_paths: list[Path],
-    do_manhattan: bool = True,
-    vp_cache_path: str = None,
-) -> list[np.ndarray]:
-    """Return centroid contact UVs for each mask (legacy helper)."""
-    contact_uvs = []
-    for path in masks_paths:
-        binary = load_aligned_binary_mask(
-            path, do_manhattan=do_manhattan, vp_cache_path=vp_cache_path
-        )
-        if not binary.any():
-            continue
-        ys, xs = np.where(binary)
-        u_centroid = float(xs.mean())
-        v_centroid = float(ys.mean())
-        contact_uv = pixel2uv(
-            np.array([u_centroid, v_centroid], dtype=np.float64),
-            w=binary.shape[1],
-            h=binary.shape[0],
-        )
-        contact_uvs.append(contact_uv)
-    return contact_uvs
-
-
-def placements_from_mask_dir(
-    mask_dir: Path | str,
-    data: dict,
-    depth: np.ndarray = None,
-    do_manhattan: bool = True,
-    vp_cache_path: str = None,
-    num_samples: int = 5,
-) -> list[dict]:
-    """
-    For each mask_*.png under mask_dir, run resolve_standing_pose and
-    return JSON-serializable placement records (translation + yaw rotation).
-    """
-    mask_dir = Path(mask_dir)
-    placements = []
-    for path in get_masks(mask_dir):
-        record = {
-            'mask': path.name,
-            'translation': None,
-            'rotation': None,
-            'contact_uv': None,
-            'surface': None,
-        }
-        try:
-            binary = load_aligned_binary_mask(
-                path, do_manhattan=do_manhattan, vp_cache_path=vp_cache_path
-            )
-        except Exception as exc:
-            record['error'] = str(exc)
-            placements.append(record)
-            continue
-
-        if not binary.any():
-            record['error'] = 'empty mask'
-            placements.append(record)
-            continue
-
-        translation, contact_uv, surface, rotation = resolve_standing_pose(
-            binary,
-            data,
-            depth=depth,
-            num_samples=num_samples,
-        )
-        if translation is not None:
-            record['translation'] = np.asarray(translation, dtype=np.float64).reshape(3).tolist()
-        if contact_uv is not None:
-            record['contact_uv'] = np.asarray(contact_uv, dtype=np.float64).reshape(2).tolist()
-        record['surface'] = surface
-        record['rotation'] = rotation
-        placements.append(record)
-
-    return placements
 
 
 def to_json_frame(xyz: np.ndarray) -> np.ndarray:
@@ -139,6 +15,67 @@ def to_json_frame(xyz: np.ndarray) -> np.ndarray:
     out = np.dot(r_180, xyz)
     out[0] *= -1
     return out
+
+
+# Linear map from xyz2json / layoutPoints coordinates into visualization.obj3d
+# create_3d_obj mesh coordinates.
+#
+# LGT spherical (lonlat2xyz): p = (x, y, z) with +Y toward the floor.
+# xyz2json frame:              j = (x, y, -z)
+# create_3d_obj mesh:          m = (z, -y, x)  i.e. stack([.., -sin(lat), ..])
+# Combined j -> m:             m = (-j_z, -j_y, j_x)
+#
+# Floor at j_y = +cameraHeight therefore becomes m_y = -cameraHeight, matching
+# the textured layout mesh (floor below camera, ceiling above).
+JSON_TO_OBJ3D = np.array(
+    [
+        [0.0, 0.0, -1.0],
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ],
+    dtype=np.float64,
+)
+
+
+def json_frame_to_obj3d(xyz: np.ndarray) -> np.ndarray:
+    """
+    Convert a point from the xyz2json / placement frame into create_3d_obj
+    mesh coordinates used by the exported room ``*_3d.obj``.
+
+    ``m = (-z, -y, x)`` for json ``(x, y, z)``.
+    """
+    xyz = np.asarray(xyz, dtype=np.float64).reshape(3)
+    return JSON_TO_OBJ3D @ xyz
+
+
+def json_rotation_to_obj3d(rotation: np.ndarray) -> np.ndarray:
+    """
+    Convert a 3x3 rotation expressed in the xyz2json frame into create_3d_obj
+    mesh coordinates: ``R_mesh = T @ R_json @ T.T``.
+    """
+    r = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    return JSON_TO_OBJ3D @ r @ JSON_TO_OBJ3D.T
+
+
+def placement_to_obj3d_frame(
+    translation: np.ndarray,
+    rotation: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """
+    Convert placement translation (and optional rotation matrix) from the
+    xyz2json frame into the create_3d_obj frame for mesh visualization.
+    """
+    t_mesh = json_frame_to_obj3d(translation)
+    r_mesh = json_rotation_to_obj3d(rotation) if rotation is not None else None
+    return t_mesh, r_mesh
+
+
+def _normalize(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float64).reshape(3)
+    n = float(np.linalg.norm(v))
+    if n < eps:
+        raise ValueError("Cannot normalize near-zero vector")
+    return v / n
 
 
 def uv2equirectangular(uv: np.ndarray) -> np.ndarray:
@@ -517,119 +454,117 @@ def rotation_matrix_yaw(yaw: float) -> np.ndarray:
     )
 
 
-def resolve_standing_rotation(
-    translation: np.ndarray,
-    data: dict,
-    wall: dict = None,
-) -> tuple[float | None, np.ndarray | None, np.ndarray | None]:
+def mask_angular_height(binary: np.ndarray) -> float:
+    """Vertical angular span of a mask in an equirectangular pano (radians)."""
+    binary = np.asarray(binary)
+    ys, _ = np.where(binary)
+    if len(ys) == 0:
+        return 0.0
+    h = binary.shape[0]
+    v0 = (float(ys.min()) + 0.5) / h
+    v1 = (float(ys.max()) + 0.5) / h
+    return abs(v1 - v0) * np.pi
+
+
+def range_from_angular_size(
+    angular_height: float,
+    object_height: float,
+    eps: float = 1e-3,
+) -> float:
     """
-    Build yaw-only rotation for a placed object at translation.
-
-    Uses the given wall (wall-mounted hit) or the nearest layout wall
-    (floor objects). Front faces flush into the room along the inward normal.
-
-    Returns (yaw_radians, R_3x3, inward_normal) or (None, None, None).
+    Pinhole-style range from apparent angular height:
+    ``R ≈ H / (2 * tan(α / 2))``.
     """
-    translation = np.asarray(translation, dtype=np.float64).reshape(3)
-    if wall is not None:
-        try:
-            normal = inward_wall_normal(wall['normal'], translation)
-        except ValueError:
-            return None, None, None
-    else:
-        _, _, normal = nearest_wall(translation, data)
-        if normal is None:
-            return None, None, None
-
-    yaw = yaw_from_wall_normal(normal)
-    return yaw, rotation_matrix_yaw(yaw), normal
+    alpha = float(np.clip(angular_height, eps, np.pi - eps))
+    height = float(max(object_height, eps))
+    return float(height / (2.0 * np.tan(0.5 * alpha)))
 
 
-def resolve_standing_translation(
-    binary: np.ndarray,
-    data: dict,
-    origin: np.ndarray = None,
-    num_samples: int = 5,
-    depth: np.ndarray = None,
-) -> tuple[np.ndarray | None, np.ndarray | None, str | None]:
+def azimuth_unit_xz(direction: np.ndarray, uv: np.ndarray) -> np.ndarray | None:
     """
-    Raycast from mask-centroid contact UVs onto the layout.
+    Unit horizontal bearing in the JSON XZ plane.
 
-    For each contact UV:
-      1) Floor hit inside footprint (optional Step-5 closer-than-wall check if depth given)
-      2) Else wall-mounted fallback: nearest layoutWalls segment hit along the same ray
-
-    Returns (translation, contact_uv, surface) where surface is 'floor' or 'wall',
-    or (None, None, None) if no valid hit is found.
+    Prefers the ray's XZ component; near nadir falls back to longitude-only
+    bearing from ``uv`` so freestanding range placement still has an azimuth.
     """
-    translation, contact_uv, surface, _ = resolve_standing_pose(
-        binary, data, origin=origin, num_samples=num_samples, depth=depth
+    direction = np.asarray(direction, dtype=np.float64).reshape(3)
+    horiz = direction.copy()
+    horiz[1] = 0.0
+    n = float(np.linalg.norm(horiz))
+    if n >= 1e-8:
+        return horiz / n
+
+    lon = float(uv2lonlat(np.asarray(uv, dtype=np.float64).reshape(2))[0])
+    # Equator ray in LGT spherical coords, then into xyz2json.
+    bearing = to_json_frame(
+        np.array([np.sin(lon), 0.0, np.cos(lon)], dtype=np.float64)
     )
-    return translation, contact_uv, surface
+    bearing[1] = 0.0
+    n = float(np.linalg.norm(bearing))
+    if n < 1e-8:
+        return None
+    return bearing / n
 
 
-def resolve_standing_pose(
-    binary: np.ndarray,
+def wall_fraction_from_elevation(
+    direction: np.ndarray,
+    fraction_near: float = 0.28,
+    fraction_far: float = 0.82,
+    dy_near: float = 0.97,
+    dy_far: float = 0.35,
+) -> float:
+    """
+    Map ray elevation to a freestanding wall-distance fraction.
+
+    In the JSON frame +Y points at the floor, so ``|d_y|≈1`` is nadir (near
+    camera) and smaller ``|d_y|`` is toward the horizon (farther into the room).
+    """
+    dy = abs(float(np.asarray(direction, dtype=np.float64).reshape(3)[1]))
+    if dy_near <= dy_far:
+        return float(fraction_near)
+    t = (dy - dy_far) / (dy_near - dy_far)
+    t = float(np.clip(t, 0.0, 1.0))
+    return float(fraction_far * (1.0 - t) + fraction_near * t)
+
+
+def place_on_floor_at_range(
+    origin: np.ndarray,
+    azimuth_xz: np.ndarray,
+    range_m: float,
     data: dict,
-    origin: np.ndarray = None,
-    num_samples: int = 5,
-    depth: np.ndarray = None,
-) -> tuple[np.ndarray | None, np.ndarray | None, str | None, dict | None]:
-    """
-    Resolve translation and yaw rotation for one mask.
+) -> np.ndarray:
+    """Point on the JSON floor plane at ``range_m`` along ``azimuth_xz``."""
+    origin = np.asarray(origin, dtype=np.float64).reshape(3)
+    azimuth_xz = _normalize(
+        np.array([azimuth_xz[0], 0.0, azimuth_xz[2]], dtype=np.float64)
+    )
+    camera_height = float(data["cameraHeight"])
+    r = float(max(range_m, 0.0))
+    return np.array(
+        [
+            origin[0] + r * azimuth_xz[0],
+            camera_height,
+            origin[2] + r * azimuth_xz[2],
+        ],
+        dtype=np.float64,
+    )
 
-    Rotation convention: mesh local +Z faces flush into the room along the
-    inward normal of the nearest (or hit) wall — back against the wall.
 
-    Returns
-      (translation, contact_uv, surface, rotation)
-    where rotation is
-      {'yaw': float, 'matrix': 3x3 list, 'wall_normal': [nx, ny, nz]}
-    or (None, None, None, None) on failure.
-    """
-    if origin is None:
-        origin = np.zeros(3, dtype=np.float64)
-    else:
-        origin = np.asarray(origin, dtype=np.float64).reshape(3)
-
-    if depth is not None:
-        depth = np.asarray(depth, dtype=np.float64).reshape(-1)
-
-    for uv in contact_uvs_from_mask(binary, num_samples=num_samples):
-        direction = uv2equirectangular(uv)
-        translation = None
-        surface = None
-        hit_wall = None
-
-        try:
-            p_floor = ray_intersect_floor(origin, direction, data)
-        except ValueError:
-            p_floor = None
-
-        if p_floor is not None and check_floor_hit(p_floor, data):
-            if depth is None or closer_than_wall(p_floor, uv, depth, data):
-                translation, surface = p_floor, 'floor'
-
-        if translation is None:
-            p_wall, hit_wall = ray_intersect_wall(
-                origin, direction, data, return_wall=True
-            )
-            if p_wall is not None:
-                translation, surface = p_wall, 'wall'
-
-        if translation is None:
-            continue
-
-        yaw, matrix, normal = resolve_standing_rotation(
-            translation, data, wall=hit_wall
-        )
-        rotation = None
-        if yaw is not None and matrix is not None and normal is not None:
-            rotation = {
-                'yaw': float(yaw),
-                'matrix': matrix.tolist(),
-                'wall_normal': normal.tolist(),
-            }
-        return translation, uv, surface, rotation
-
-    return None, None, None, None
+def shrink_range_into_footprint(
+    origin: np.ndarray,
+    azimuth_xz: np.ndarray,
+    range_m: float,
+    data: dict,
+    min_range: float = 0.2,
+    steps: int = 12,
+) -> np.ndarray | None:
+    """Reduce range until the floor point lies inside the layout footprint."""
+    r = float(range_m)
+    for _ in range(steps):
+        p = place_on_floor_at_range(origin, azimuth_xz, r, data)
+        if check_floor_hit(p, data):
+            return p
+        r *= 0.85
+        if r < min_range:
+            break
+    return None

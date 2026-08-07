@@ -102,6 +102,36 @@ checkpoints
 |       |-- best.pkl
 ```
 
+# Run Experiments
+
+This repo also contains the necessary code to run experiments on LGT prediction quality and furniture placements. The diagram below demonstrates the full experiment pipeline and how each component is set up. We use Docker to containerize a prediction service for GroundingDINO, Inpaint-Anything, and LGT-Net separately. 
+
+![experiment_logic](src/fig/experiment_logic.png)
+
+This repo is set up such that whilst the 3 aforementioned model services needs to be started manually, acquiring room layout and repositioned furniture objects from a single panorama input is automated via the orchestration layer. Here's a general overview of repo files mapped to experiment logic:
+
+- GroundingDINO/app.py -> GroundingDINO FastAPI Endpoint
+- get_pano_masks.py/gen_furniture_3d.py -> SAM/SAM3D FAL service
+- Inpaint-Anything/app.py -> Inpaint-Anything FastAPI Endpoint
+- LGT-Net/app.py -> LGT-Net FastAPI Endpoint
+- run_pipeline.py -> Experiment Orchestrator.
+
+
+## How to run the full pipeline
+
+First, manually set up the inference service for GroundingDINO and Inpaint-Anything by running the following command in their respective folders (i.e. cd into folder root):
+
+*NOTE: LGT-Net service should be started from repo root directory*
+
+```bash
+docker compose up
+```
+
+Then, customize *pipeline_config.json* with your experiment configurations, make sure the image URL is a publicly accessible link with /GET method enabled.
+
+Finally, simply execute *run_pipeline.py* to acquire the layout/furniture output and produce the intermediate artefacts if neccesary.
+
+
 # Acknowledgements
 The code style is modified based on [Swin-Transformer](https://github.com/microsoft/Swin-Transformer).
 

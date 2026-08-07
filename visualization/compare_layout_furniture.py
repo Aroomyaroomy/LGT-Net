@@ -324,13 +324,15 @@ def align_furniture_to_room(
     furniture_mesh: "open3d.geometry.TriangleMesh",
     floor_y: float = 0.0,
 ) -> "open3d.geometry.TriangleMesh":
-    """将家具模型对齐到房间地面。
+    """Snap the mesh AABB bottom onto a horizontal floor plane.
 
-    自动检测家具 mesh 的包围盒最低点，将其平移到房间地面高度 y = floor_y。
+    After pose (rotation + translation), shift along +Y so
+    ``aabb.min_y == floor_y``. For create_3d_obj / Open3D viz, the layout
+    floor is typically ``floor_y ≈ -cameraHeight`` (e.g. -1.6), not 0.
 
     Args:
         furniture_mesh: 家具 TriangleMesh。
-        floor_y: 房间地面的 y 坐标（LGT 坐标系中地面高度）。
+        floor_y: Target floor height in the mesh/world frame.
 
     Returns:
         对齐后的家具 mesh。
