@@ -248,8 +248,10 @@ def predict(
     json_data = save_pred_json(output_xyz, tensor2np(dt['ratio'][0])[0])
 
     placements = None
+    placement_success = 0
+    placement_failure = 0
     if mask_dir is not None:
-        placements = placements_from_mask_dir(
+        placements, placement_success, placement_failure = placements_from_mask_dir(
             mask_dir,
             json_data,
             depth=tensor2np(dt['depth'][0]),
@@ -257,7 +259,16 @@ def predict(
             vp_cache_path=vp_cache_path,
         )
         with open(os.path.join(job_dir, f'{job_id}_placements.json'), 'w', encoding='utf-8') as f:
-            json.dump({'job_id': job_id, 'placements': placements}, f, indent=2)
+            json.dump(
+                {
+                    'job_id': job_id,
+                    'placements': placements,
+                    'placement_success': placement_success,
+                    'placement_failure': placement_failure,
+                },
+                f,
+                indent=2,
+            )
 
     mesh_url = None
     point_cloud_url = None
@@ -290,6 +301,8 @@ def predict(
         'job_id': job_id,
         'coordinates': json_data,
         'placements': placements,
+        'placement_success': placement_success,
+        'placement_failure': placement_failure,
         'mesh_url': mesh_url,
         'point_cloud_url': point_cloud_url,
     }

@@ -27,10 +27,13 @@ from get_pano_masks import (
 )
 from gen_furniture_3d import wait_and_fetch_3d_job, submit_3d_job
 from reposition import (
+    height_from_angular_size,
     json_frame_to_obj3d,
+    json_rotation_to_obj3d,
     load_sam3d_metadata,
     merge_sam3d_orientations_into_placements,
     placement_to_obj3d_frame,
+    uprightness_metrics,
 )
 from visualization.compare_layout_furniture import (
     FURNITURE_COLORS,
@@ -451,13 +454,27 @@ def run_lgt_net(
 
     coordinates = predict_data.get("coordinates")
     placements = predict_data.get("placements")
+    placement_success = int(predict_data.get("placement_success") or 0)
+    placement_failure = int(predict_data.get("placement_failure") or 0)
 
     placements_path = None
     if placements is not None:
         placements_path = os.path.join(root_dir, f"{job_id}_placements.json")
         with open(placements_path, "w", encoding="utf-8") as f:
-            json.dump({"job_id": job_id, "placements": placements}, f, indent=2)
-        print(f"  [LGT] placements -> {os.path.abspath(placements_path)}")
+            json.dump(
+                {
+                    "job_id": job_id,
+                    "placements": placements,
+                    "placement_success": placement_success,
+                    "placement_failure": placement_failure,
+                },
+                f,
+                indent=2,
+            )
+        print(
+            f"  [LGT] placements -> {os.path.abspath(placements_path)} "
+            f"(success={placement_success}, failure={placement_failure})"
+        )
 
     mesh_path = None
     if output_mesh:
@@ -479,10 +496,50 @@ def run_lgt_net(
         "job_id": job_id,
         "coordinates": coordinates,
         "placements": placements,
+        "placement_success": placement_success,
+        "placement_failure": placement_failure,
         "placements_path": placements_path,
         "mesh_path": mesh_path,
         "point_cloud_path": point_cloud_path,
     }
+
+
+def evaluate_placement_uprightness(placements: Optional[List[dict]]) -> List[dict]:
+    """
+    Evaluation-only uprightness for each successfully placed object.
+
+    Skipped placements (missing translation or scale) are omitted. Rotation
+    matrices still in the xyz2json frame are remapped to create_3d_obj / +Y-up
+    before scoring so the metric matches the posed scene.
+    """
+    report: List[dict] = []
+    if not placements:
+        return report
+
+    for placement in placements:
+        if placement.get("translation") is None or placement.get("scale") is None:
+            continue
+        rotation = placement.get("rotation") or {}
+        matrix = rotation.get("matrix") if isinstance(rotation, dict) else None
+        if matrix is None:
+            continue
+
+        r = np.asarray(matrix, dtype=np.float64).reshape(3, 3)
+        if not (isinstance(rotation, dict) and rotation.get("frame") == "obj3d"):
+            r = json_rotation_to_obj3d(r)
+
+        metrics = uprightness_metrics(r)
+        report.append(
+            {
+                "mask": placement.get("mask"),
+                "surface": placement.get("surface"),
+                "orientation_source": (
+                    rotation.get("source") if isinstance(rotation, dict) else None
+                ),
+                **metrics,
+            }
+        )
+    return report
 
 
 def _mesh_path_for_mask(furniture_dir: str, mask_name: str) -> Optional[str]:
@@ -617,7 +674,9 @@ def run_pipeline_from_config(config: dict) -> dict:
     )
     print(
         f"    [LGT-Net] request complete: {lgt_net_result.get('job_id')} "
-        f"layout mesh saved"
+        f"layout mesh saved "
+        f"(placement success={lgt_net_result.get('placement_success', 0)}, "
+        f"failure={lgt_net_result.get('placement_failure', 0)})"
     )
 
     # Hybrid pose: LGT translation + SAM3D upright/yaw when metadata exists.
@@ -627,18 +686,43 @@ def run_pipeline_from_config(config: dict) -> dict:
             lgt_net_result["placements"], metadata_path
         )
         lgt_net_result = {**lgt_net_result, "placements": merged}
-        placements_path = lgt_net_result.get("placements_path")
-        if placements_path:
-            with open(placements_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "job_id": lgt_net_result.get("job_id"),
-                        "placements": merged,
-                        "orientation_source": "sam3d_hybrid",
-                    },
-                    f,
-                    indent=2,
-                )
+
+    uprightness_report = evaluate_placement_uprightness(
+        lgt_net_result.get("placements")
+    )
+    lgt_net_result = {
+        **lgt_net_result,
+        "uprightness": uprightness_report,
+    }
+
+    placements_path = lgt_net_result.get("placements_path")
+    if placements_path and lgt_net_result.get("placements") is not None:
+        with open(placements_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "job_id": lgt_net_result.get("job_id"),
+                    "placements": lgt_net_result.get("placements"),
+                    "placement_success": lgt_net_result.get("placement_success", 0),
+                    "placement_failure": lgt_net_result.get("placement_failure", 0),
+                    "uprightness": uprightness_report,
+                    "orientation_source": (
+                        "sam3d_hybrid"
+                        if os.path.isfile(metadata_path)
+                        else "lgt"
+                    ),
+                },
+                f,
+                indent=2,
+            )
+
+    if uprightness_report:
+        mean_cos = float(
+            np.mean([row["cos"] for row in uprightness_report])
+        )
+        print(
+            f"    [LGT-Net] uprightness: n={len(uprightness_report)} "
+            f"mean_cos={mean_cos:.4f}"
+        )
 
     viz_geometries = None
     if bool(viz_cfg.get("enabled", True)):
@@ -661,6 +745,9 @@ def run_pipeline_from_config(config: dict) -> dict:
         "lgt_net": lgt_net_result,
         "mask_dir": mask_dir,
         "object_dir": object_dir,
+        "placement_success": lgt_net_result.get("placement_success", 0),
+        "placement_failure": lgt_net_result.get("placement_failure", 0),
+        "uprightness": uprightness_report,
         "visualize": viz_geometries,
     }
 
@@ -686,6 +773,10 @@ def visualize_placed_furniture(
       3) else wall-heuristic rotation from LGT (xyz2json → obj3d remap)
 
     Translation always comes from LGT and is remapped xyz2json → obj3d.
+    Uniform ``placement.scale.factor`` is applied when present. If the LGT
+    service lacked mesh heights (scale method still ``sam3d``) but stored
+    room-distance angular metadata, the factor is recomputed from the local
+    GLB AABB height before posing.
     When ``snap_to_floor`` is True (default), freestanding meshes are raised /
     lowered after posing so their AABB bottom sits on the placement floor
     plane (SAM3D pivots are usually mesh-centered).
@@ -775,6 +866,49 @@ def visualize_placed_furniture(
             rot_matrix = np.asarray(rotation["matrix"], dtype=np.float64)
         translation_vec = np.asarray(translation, dtype=np.float64).reshape(3)
 
+        scale_info = placement.get("scale") or {}
+        if not isinstance(scale_info, dict):
+            scale_info = {"factor": float(scale_info), "method": "placement"}
+        scale_factor = float(scale_info.get("factor", 1.0) or 1.0)
+        scale_method = scale_info.get("method") or "sam3d"
+
+        # LGT Docker often lacks furniture meshes, so scale stays sam3d=1.0.
+        # Recompute room-distance scale here from local GLB + stored α / R.
+        if (
+            placement.get("surface") != "wall"
+            and scale_method == "sam3d"
+            and abs(scale_factor - 1.0) < 1e-6
+        ):
+            range_method = (
+                scale_info.get("range_method")
+                or (rotation.get("range_method") if isinstance(rotation, dict) else None)
+            )
+            alpha = scale_info.get("angular_height")
+            range_m = scale_info.get("range_m")
+            if (
+                range_method in ("floor", "wall_fraction")
+                and alpha is not None
+                and range_m is not None
+                and float(alpha) > 1e-3
+                and float(range_m) > 1e-3
+            ):
+                try:
+                    extents = mesh.get_axis_aligned_bounding_box().get_extent()
+                    h_mesh = float(extents[1])
+                    if h_mesh > 1e-4:
+                        h_target = height_from_angular_size(float(alpha), float(range_m))
+                        scale_factor = float(np.clip(h_target / h_mesh, 0.2, 3.0))
+                        scale_method = "room_distance"
+                        scale_info = {
+                            **scale_info,
+                            "factor": scale_factor,
+                            "method": scale_method,
+                            "object_height": h_mesh,
+                            "target_height": float(h_target),
+                        }
+                except Exception:
+                    pass
+
         # Translations are always xyz2json → obj3d. SAM3D rotations are already
         # authored in the obj3d / Open3D Y-up frame; wall heuristics are not.
         translation_vec = json_frame_to_obj3d(translation_vec)
@@ -785,7 +919,12 @@ def visualize_placed_furniture(
                 np.zeros(3, dtype=np.float64), rot_matrix
             )
 
-        transform_mesh(mesh, translation=translation_vec, rotation=rot_matrix)
+        transform_mesh(
+            mesh,
+            translation=translation_vec,
+            rotation=rot_matrix,
+            scale=scale_factor,
+        )
 
         # Placement puts the mesh origin on the floor; SAM3D GLBs are usually
         # centered, so half the body would clip below the floor. Snap the
@@ -806,9 +945,14 @@ def visualize_placed_furniture(
             yaw_str = f", yaw={yaw:.3f}" if isinstance(yaw, (int, float)) else ""
             src_str = f", ori={src}" if src else ""
             snap_str = ", floor_snap" if snapped else ""
+            scale_str = (
+                f", scale={scale_factor:.3f}({scale_method})"
+                if abs(scale_factor - 1.0) > 1e-3 or scale_method != "sam3d"
+                else ""
+            )
             print(
                 f"  [VIZ] placed {os.path.basename(mesh_path)} "
-                f"t={translation_vec.tolist()}{yaw_str}{src_str}{snap_str}"
+                f"t={translation_vec.tolist()}{yaw_str}{src_str}{scale_str}{snap_str}"
             )
 
     if not geometries:

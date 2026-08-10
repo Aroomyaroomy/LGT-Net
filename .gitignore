@@ -13,3 +13,7 @@ investigation_material/
 *.ipynb
 Post-Porcessing.md
 living_room_test/
+small_square_room_test/
+pipeline_experiments/
+pipeline_experiments_aug10/
+pipeline_experiments6/

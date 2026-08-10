@@ -13,6 +13,73 @@ SAM3D_UP = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 OBJ3D_UP = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
 
+def uprightness(
+    rotation: np.ndarray | dict | None,
+    *,
+    local_up: np.ndarray | None = None,
+    world_up: np.ndarray | None = None,
+) -> float:
+    """
+    Evaluation-only uprightness score in ``[-1, 1]``.
+
+    Pure geometric metric — not used by placement / rendering:
+
+      ``cos(tilt) = (R @ local_up) · world_up``
+
+    with both vectors unit-normalized. Defaults use create_3d_obj / Open3D
+    ``+Y`` as both mesh-local up and world up.
+
+      1.0  → perfectly upright
+      0.0  → tipped onto its side
+     -1.0  → upside down
+
+    ``rotation`` may be a 3×3 matrix, a placement ``rotation`` dict with a
+    ``matrix`` field, or ``None`` (treated as identity).
+    """
+    r = _rotation_matrix_from_eval_input(rotation)
+    local = _normalize(OBJ3D_UP if local_up is None else local_up)
+    world = _normalize(OBJ3D_UP if world_up is None else world_up)
+    tipped = _normalize(r @ local)
+    return float(np.clip(np.dot(tipped, world), -1.0, 1.0))
+
+
+def uprightness_metrics(
+    rotation: np.ndarray | dict | None,
+    *,
+    local_up: np.ndarray | None = None,
+    world_up: np.ndarray | None = None,
+) -> dict:
+    """
+    Evaluation-only uprightness breakdown (does not affect placement).
+
+    Returns
+      cos:          ``uprightness`` in ``[-1, 1]``
+      tilt_deg:     angle between object up and world up in ``[0, 180]``
+      upright_01:   ``(cos + 1) / 2`` mapped to ``[0, 1]`` for averages
+    """
+    cos = uprightness(rotation, local_up=local_up, world_up=world_up)
+    tilt_deg = float(np.degrees(np.arccos(cos)))
+    return {
+        "cos": cos,
+        "tilt_deg": tilt_deg,
+        "upright_01": float(0.5 * (cos + 1.0)),
+    }
+
+
+def _rotation_matrix_from_eval_input(
+    rotation: np.ndarray | dict | None,
+) -> np.ndarray:
+    if rotation is None:
+        return np.eye(3, dtype=np.float64)
+    if isinstance(rotation, dict):
+        matrix = rotation.get("matrix")
+        if matrix is None:
+            return np.eye(3, dtype=np.float64)
+        rotation = matrix
+    r = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    return r
+
+
 def quat_xyzw_to_rotation_matrix(quat) -> np.ndarray:
     """Unit quaternion ``[x, y, z, w]`` → 3×3 rotation (local → world)."""
     q = np.asarray(quat, dtype=np.float64).reshape(-1)

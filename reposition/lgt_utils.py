@@ -480,6 +480,21 @@ def range_from_angular_size(
     return float(height / (2.0 * np.tan(0.5 * alpha)))
 
 
+def height_from_angular_size(
+    angular_height: float,
+    range_m: float,
+    eps: float = 1e-3,
+) -> float:
+    """
+    Inverse of ``range_from_angular_size``: metric height implied by apparent
+    angular height at a known horizontal range.
+    ``H ≈ 2 R tan(α / 2)``.
+    """
+    alpha = float(np.clip(angular_height, eps, np.pi - eps))
+    r = float(max(range_m, eps))
+    return float(2.0 * r * np.tan(0.5 * alpha))
+
+
 def azimuth_unit_xz(direction: np.ndarray, uv: np.ndarray) -> np.ndarray | None:
     """
     Unit horizontal bearing in the JSON XZ plane.

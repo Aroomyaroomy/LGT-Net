@@ -1,10 +1,10 @@
 {
-  "image_url": "https://this-is-a-valid-bucket-name-651697298829-ap-northeast-1-an.s3.ap-northeast-1.amazonaws.com/living_room.jpg",
-  "root_dir": "living_room_test",
+  "image_url": "",
+  "root_dir": "small_square_room_test",
   "api_key": "dev-only-insecure-key",
   "dino": {
     "service_url": "http://localhost:8001",
-    "text_prompt": "soft . chair . cabinet . utensils . table . lamp ",
+    "text_prompt": "air conditioner. wall-mounted cabinet. wall-mounted lamp. ceiling lamp .  ",
     "box_threshold": 0.3,
     "text_threshold": 0.25,
     "visualize": false,

@@ -13,6 +13,7 @@ from .lgt_utils import (
     inward_wall_normal,
     json_frame_to_obj3d,
     json_rotation_to_obj3d,
+    height_from_angular_size,
     mask_angular_height,
     nearest_wall,
     patch_index_from_uv,
@@ -33,14 +34,15 @@ from .lgt_utils import (
     yaw_from_wall_normal,
 )
 from .reposition import (
+    default_standing_rotation,
     freestanding_floor_translation,
     get_masks,
     load_aligned_binary_mask,
     placements_from_mask_dir,
     preprocess_masks,
+    resolve_mesh_scale,
     resolve_standing_pose,
     resolve_standing_rotation,
-    resolve_standing_translation,
 )
 from .sam_utils import (
     OBJ3D_UP,
@@ -54,6 +56,8 @@ from .sam_utils import (
     rotation_aligning_vectors,
     sam3d_orientation_to_obj3d,
     signed_angle_about_axis,
+    uprightness,
+    uprightness_metrics,
 )
 
 __all__ = [
@@ -65,9 +69,11 @@ __all__ = [
     "check_floor_hit",
     "closer_than_wall",
     "contact_uvs_from_mask",
+    "default_standing_rotation",
     "floor_polygon_from_layout",
     "freestanding_floor_translation",
     "get_masks",
+    "height_from_angular_size",
     "horizontal_range",
     "horizontal_wall_normal",
     "inward_wall_normal",
@@ -90,6 +96,7 @@ __all__ = [
     "range_from_angular_size",
     "ray_intersect_floor",
     "ray_intersect_wall",
+    "resolve_mesh_scale",
     "resolve_standing_pose",
     "resolve_standing_rotation",
     "resolve_standing_translation",
@@ -102,6 +109,8 @@ __all__ = [
     "solve_t",
     "solve_t_plane",
     "to_json_frame",
+    "uprightness",
+    "uprightness_metrics",
     "uv2equirectangular",
     "wall_distance_from_depth",
     "wall_fraction_from_elevation",
