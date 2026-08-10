@@ -1,0 +1,126 @@
+# =============================================================================
+# LGT Pipeline — 3 independent inference containers
+# =============================================================================
+#
+#  USAGE
+#    # 1) Download weights to the host (one time)
+#    python download_weights.py
+#
+#    # 2) Build & start all 3 containers
+#    docker compose up -d --build
+#
+#    # 3) Verify
+#    curl http://localhost:8001/health
+#    curl http://localhost:8002/health
+#    curl http://localhost:8000/health
+#
+#  WEIGHTS (mounted as volumes — NOT baked into images, NOT stored in Git)
+#    GroundingDINO  → ./GroundingDINO/weights/    (662 MB)
+#    LGT-Net        → ./checkpoints/              (456 MB)
+#    Inpaint-Anything → HuggingFace (auto-downloaded during build, 500 MB)
+#
+#  CI / PRODUCTION
+#    docker compose build --build-arg PRELOAD_MODELS=true
+#    (downloads weights during build so no host mount is needed)
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # GroundingDINO — object detection from text prompts  (:8001)
+  # ---------------------------------------------------------------------------
+  groundingdino:
+    build:
+      context: ./GroundingDINO
+      dockerfile: Dockerfile
+    image: groundingdino:inference
+    container_name: groundingdino
+    ports:
+      - "8001:8001"
+    environment:
+      CUDA_VISIBLE_DEVICES: "0"
+      DINO_CONFIG_DIR: /opt/groundingdino/groundingdino/config/GroundingDINO_SwinT_OGC.py
+      DINO_CKPT_DIR: /opt/groundingdino/weights/groundingdino_swint_ogc.pth
+      DINO_OUTPUT_DIR: /data
+      DINO_DEV_MODE: "true"
+      DINO_SECRET_KEY: dev-local-test-key-16chars
+    volumes:
+      - ./GroundingDINO/weights:/opt/groundingdino/weights:ro  # model weights
+      - dino_data:/data                                         # job output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Inpaint-Anything — LaMa-based image inpainting  (:8002)
+  # ---------------------------------------------------------------------------
+  inpaint:
+    build:
+      context: ./Inpaint-Anything
+      dockerfile: Dockerfile
+    image: inpaint-anything:inference
+    container_name: inpaint-anything
+    ports:
+      - "8002:8002"
+    environment:
+      CUDA_VISIBLE_DEVICES: "0"
+      LAMA_CONFIG: /opt/inpaint-anything/lama/configs/prediction/default.yaml
+      LAMA_CKPT: /opt/inpaint-anything/pretrained_models/big-lama
+      INPAINT_DEV_MODE: "true"
+      INPAINT_SECRET_KEY: dev-local-test-key-16chars
+      INPAINT_DEVICE: cuda
+      INPAINT_OUTPUT_DIR: /data
+    volumes:
+      - inpaint_data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # LGT-Net — panoramic room layout estimation  (:8000)
+  # ---------------------------------------------------------------------------
+  lgt-net:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lgt-net:inference
+    container_name: lgt-net
+    ports:
+      - "8000:8000"
+    environment:
+      CUDA_VISIBLE_DEVICES: "0"
+      LGT_DEV_MODE: "true"
+      LGT_SECRET_KEY: dev-local-test-key-16chars
+      LGT_CONFIG_DIR: src/config/zind.yaml
+      LGT_OUTPUT_DIR: src/output
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro  # model weights (read-only)
+      - lgt_output:/app/src/output         # mesh / results
+      - lgt_jobs:/app/jobs                 # job cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+# -----------------------------------------------------------------------------
+# Named volumes (data survives container restarts, no Git pollution)
+# -----------------------------------------------------------------------------
+volumes:
+  dino_data:
+  inpaint_data:
+  lgt_output:
+  lgt_jobs:

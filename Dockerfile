@@ -44,7 +44,22 @@ COPY visualization /app/visualization
 COPY src/config /app/src/config
 
 # explicitly create output and checkpoint dirs
+# Weights are NOT baked into the image — mount ./checkpoints:/app/checkpoints at runtime.
+# Optional pre-download: docker compose build --build-arg PRELOAD_MODELS=true
 RUN mkdir -p /app/src/output /app/checkpoints
+
+ARG PRELOAD_MODELS=false
+RUN if [ "$PRELOAD_MODELS" = "true" ]; then \
+        pip install --no-cache-dir gdown && \
+        echo "Downloading LGT-Net Zind checkpoint (456 MB) ..." && \
+        mkdir -p /app/checkpoints/SWG_Transformer_LGT_Net/zind && \
+        gdown --id 1PzBj-dfDfH_vevgSkRe5kczW0GVl_43I \
+            -O /app/checkpoints/SWG_Transformer_LGT_Net/zind/best.pkl && \
+        ls -lh /app/checkpoints/SWG_Transformer_LGT_Net/zind/ && \
+        echo "LGT-Net checkpoint ready."; \
+    else \
+        echo "PRELOAD_MODELS=false — weights must be mounted at /app/checkpoints"; \
+    fi
 
 EXPOSE 8000
 

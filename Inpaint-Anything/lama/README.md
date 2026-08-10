@@ -13,31 +13,42 @@ LaMa generalizes surprisingly well to much higher resolutions (~2k❗️) than i
 [[Project page](https://advimman.github.io/lama-project/)] [[arXiv](https://arxiv.org/abs/2109.07161)] [[Supplementary](https://ashukha.com/projects/lama_21/lama_supmat_2021.pdf)] [[BibTeX](https://senya-ashukha.github.io/projects/lama_21/paper.txt)] [[Casual GAN Papers Summary](https://www.casualganpapers.com/large-masks-fourier-convolutions-inpainting/LaMa-explained.html)]
  
 <p align="center">
-  <a href="https://colab.research.google.com/github/advimman/lama/blob/master//colab/LaMa_inpainting.ipynb">
+  <a href="https://colab.research.google.com/drive/15KTEIScUbVZtUP6w2tCDMVpE-b1r9pkZ?usp=drive_link">
   <img src="https://colab.research.google.com/assets/colab-badge.svg"/>
   </a>
       <br>
-   Try out in Google Colab
+   Try out in Google Colab 
+  <br>
+  All yandex dist links went bad, you can download the model from the https://drive.google.com/drive/folders/1B2x7eQDgecTL0oh3LSIBDGj0fTxs6Ips?usp=sharing 
 </p>
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/senya-ashukha/senya-ashukha.github.io/master/projects/lama_21/ezgif-4-0db51df695a8.gif" />
 </p>
 
-
 <p align="center">
   <img src="https://raw.githubusercontent.com/senya-ashukha/senya-ashukha.github.io/master/projects/lama_21/gif_for_lightning_v1_white.gif" />
 </p>
 
+
+
 # LaMa development
 (Feel free to share your paper by creating an issue)
-- Amazing results [paper](https://arxiv.org/abs/2206.13644) / [video](https://www.youtube.com/watch?v=gEukhOheWgE) / code https://github.com/advimman/lama/pull/112 / by Geomagical Labs ([geomagical.com](geomagical.com))
+- https://github.com/geekyutao/Inpaint-Anything --- Inpaint Anything: Segment Anything Meets Image Inpainting
+<p align="center">
+  <img src="https://raw.githubusercontent.com/geekyutao/Inpaint-Anything/main/example/MainFramework.png" />
+</p>
+
+- [Feature Refinement to Improve High Resolution Image Inpainting](https://arxiv.org/abs/2206.13644) / [video](https://www.youtube.com/watch?v=gEukhOheWgE) / code https://github.com/advimman/lama/pull/112 / by Geomagical Labs ([geomagical.com](geomagical.com))
 <p align="center">
   <img src="https://raw.githubusercontent.com/senya-ashukha/senya-ashukha.github.io/master/images/FeatureRefinement.png" />
 </p>
 
 # Non-official 3rd party apps:
 (Feel free to share your app/implementation/demo by creating an issue)
+
+- https://github.com/enesmsahin/simple-lama-inpainting - a simple pip package for LaMa inpainting.
+- https://github.com/mallman/CoreMLaMa - Apple's Core ML model format
 - [https://cleanup.pictures](https://cleanup.pictures/) - a simple interactive object removal tool by [@cyrildiagne](https://twitter.com/cyrildiagne)
     - [lama-cleaner](https://github.com/Sanster/lama-cleaner) by [@Sanster](https://github.com/Sanster/lama-cleaner) is a self-host version of [https://cleanup.pictures](https://cleanup.pictures/)
 - Integrated to [Huggingface Spaces](https://huggingface.co/spaces) with [Gradio](https://github.com/gradio-app/gradio). See demo: [![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/akhaliq/lama) by [@AK391](https://github.com/AK391)
@@ -47,8 +58,11 @@ LaMa generalizes surprisingly well to much higher resolutions (~2k❗️) than i
 - [Hama](https://www.hama.app/) - object removal with a smart brush which simplifies mask drawing.
 - [ModelScope](https://www.modelscope.cn/models/damo/cv_fft_inpainting_lama/summary) = the largest Model Community in Chinese by  [@chenbinghui1](https://github.com/chenbinghui1).
 - [LaMa with MaskDINO](https://github.com/qwopqwop200/lama-with-maskdino) = MaskDINO object detection + LaMa inpainting with refinement by [@qwopqwop200](https://github.com/qwopqwop200).
+- [CoreMLaMa](https://github.com/mallman/CoreMLaMa) - a script to convert Lama Cleaner's port of LaMa to Apple's Core ML model format.
 
 # Environment setup
+
+❗️❗️❗️ All yandex dist links went bad, you can download the model from the [google drive](https://drive.google.com/drive/folders/1B2x7eQDgecTL0oh3LSIBDGj0fTxs6Ips?usp=sharing) ❗️❗️❗️
 
 Clone the repo:
 `git clone https://github.com/advimman/lama.git`
@@ -93,23 +107,17 @@ export TORCH_HOME=$(pwd) && export PYTHONPATH=$(pwd)
 
 **1. Download pre-trained models**
 
-Install tool for yandex disk link extraction:
-
-```
-pip3 install wldhx.yadisk-direct
-```
-
 The best model (Places2, Places Challenge):
     
 ```    
-curl -L $(yadisk-direct https://disk.yandex.ru/d/ouP6l8VJ0HpMZg) -o big-lama.zip
+curl -LJO https://huggingface.co/smartywu/big-lama/resolve/main/big-lama.zip
 unzip big-lama.zip
 ```
 
 All models (Places & CelebA-HQ):
 
 ```
-curl -L $(yadisk-direct https://disk.yandex.ru/d/EgqaSnLohjuzAg) -o lama-models.zip
+download [https://drive.google.com/drive/folders/1B2x7eQDgecTL0oh3LSIBDGj0fTxs6Ips?usp=drive_link]
 unzip lama-models.zip
 ```
 
@@ -118,7 +126,6 @@ unzip lama-models.zip
 Download test images:
 
 ```
-curl -L $(yadisk-direct https://disk.yandex.ru/d/xKQJZeVRk5vLlQ) -o LaMa_test_images.zip
 unzip LaMa_test_images.zip
 ```
 <details>
@@ -151,7 +158,10 @@ The following command will pull the docker image from Docker Hub and execute the
 ```
 bash docker/2_predict.sh $(pwd)/big-lama $(pwd)/LaMa_test_images $(pwd)/output device=cpu
 ```
-Docker cuda: TODO
+Docker cuda:
+```
+bash docker/2_predict_with_gpu.sh $(pwd)/big-lama $(pwd)/LaMa_test_images $(pwd)/output
+```
 
 **4. Predict with Refinement**
 
