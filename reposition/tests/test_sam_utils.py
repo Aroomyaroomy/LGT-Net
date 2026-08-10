@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 
 from reposition.sam_utils import (
+    _horizontal_dir,
     load_sam3d_metadata,
     mask_index_from_name,
     merge_sam3d_orientations_into_placements,
@@ -429,6 +430,51 @@ class TestObjectHeightFromSam3D(unittest.TestCase):
     def test_nonexistent_furniture_dir(self):
         self.assertIsNone(
             object_height_from_sam3d(0, furniture_dir="/nonexistent/path"))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _horizontal_dir
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestHorizontalDir(unittest.TestCase):
+    def test_already_horizontal(self):
+        d = _horizontal_dir(np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+        self.assertIsNotNone(d)
+        np.testing.assert_allclose(d, [1.0, 0.0, 0.0], atol=1e-10)
+
+    def test_vertical_component_removed(self):
+        d = _horizontal_dir(np.array([1.0, 3.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+        self.assertIsNotNone(d)
+        self.assertAlmostEqual(d[1], 0.0)
+        np.testing.assert_allclose(np.linalg.norm(d), 1.0, atol=1e-10)
+
+    def test_unit_length(self):
+        d = _horizontal_dir(np.array([3.0, 7.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+        self.assertIsNotNone(d)
+        np.testing.assert_allclose(np.linalg.norm(d), 1.0, atol=1e-10)
+
+    def test_custom_up_axis(self):
+        d = _horizontal_dir(np.array([1.0, 0.0, 3.0]), np.array([0.0, 0.0, 1.0]))
+        self.assertIsNotNone(d)
+        self.assertAlmostEqual(d[2], 0.0)
+        self.assertAlmostEqual(d[1], 0.0)
+
+    def test_pure_vertical_returns_none(self):
+        d = _horizontal_dir(np.array([0.0, 1.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+        self.assertIsNone(d)
+
+    def test_zero_vector_returns_none(self):
+        d = _horizontal_dir(np.array([0.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+        self.assertIsNone(d)
+
+    def test_oblique_up_axis(self):
+        d = _horizontal_dir(
+            np.array([1.0, 1.0, 0.0]),
+            np.array([0.0, 1.0, 1.0]) / np.sqrt(2))
+        self.assertIsNotNone(d)
+        # Should be orthogonal to the up axis
+        up = np.array([0.0, 1.0, 1.0]) / np.sqrt(2)
+        self.assertAlmostEqual(np.dot(d, up), 0.0, delta=1e-10)
 
 
 if __name__ == "__main__":

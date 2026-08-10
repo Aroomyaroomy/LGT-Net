@@ -5,6 +5,8 @@ import unittest
 
 from reposition.lgt_utils import (
     _normalize,
+    _point_on_segment_xz,
+    _wall_y_bounds,
     azimuth_unit_xz,
     check_floor_hit,
     closer_than_wall,
@@ -22,6 +24,8 @@ from reposition.lgt_utils import (
     placement_to_obj3d_frame,
     point_in_floor_polygon,
     range_from_angular_size,
+    ray_intersect_floor,
+    ray_intersect_wall,
     rotation_matrix_yaw,
     shrink_range_into_footprint,
     solve_t,
@@ -698,6 +702,253 @@ class TestUv2Equirectangular(unittest.TestCase):
         d = uv2equirectangular(np.array([0.5, 0.5]))
         np.testing.assert_allclose(d[:2], [0.0, 0.0], atol=1e-6)
         self.assertLess(d[2], 0)  # forward in JSON is -Z
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _wall_y_bounds
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestWallYBounds(unittest.TestCase):
+    def test_with_explicit_ceiling(self):
+        data = {"cameraHeight": 1.6, "cameraCeilingHeight": 1.0, "layoutHeight": 2.6}
+        y_lo, y_hi = _wall_y_bounds(data)
+        self.assertAlmostEqual(y_lo, -1.0)
+        self.assertAlmostEqual(y_hi, 1.6)
+
+    def test_fallback_to_layout_height(self):
+        data = {"cameraHeight": 1.6, "layoutHeight": 3.0}
+        y_lo, y_hi = _wall_y_bounds(data)
+        self.assertAlmostEqual(y_lo, -1.4)  # -(3.0 - 1.6)
+        self.assertAlmostEqual(y_hi, 1.6)
+
+    def test_symmetric_room(self):
+        data = {"cameraHeight": 1.2, "cameraCeilingHeight": 1.2, "layoutHeight": 2.4}
+        y_lo, y_hi = _wall_y_bounds(data)
+        self.assertAlmostEqual(y_lo, -1.2)
+        self.assertAlmostEqual(y_hi, 1.2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _point_on_segment_xz
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestPointOnSegmentXZ(unittest.TestCase):
+    def setUp(self):
+        self.a = np.array([0.0, 99.0, 0.0], dtype=np.float64)
+        self.b = np.array([4.0, 99.0, 0.0], dtype=np.float64)
+
+    def test_point_on_segment_midpoint(self):
+        self.assertTrue(
+            _point_on_segment_xz(np.array([2.0, 0.0, 0.0]), self.a, self.b))
+
+    def test_point_on_segment_endpoint(self):
+        self.assertTrue(
+            _point_on_segment_xz(np.array([0.0, 0.0, 0.0]), self.a, self.b))
+        self.assertTrue(
+            _point_on_segment_xz(np.array([4.0, 0.0, 0.0]), self.a, self.b))
+
+    def test_point_before_segment_start(self):
+        self.assertFalse(
+            _point_on_segment_xz(np.array([-0.5, 0.0, 0.0]), self.a, self.b))
+
+    def test_point_after_segment_end(self):
+        self.assertFalse(
+            _point_on_segment_xz(np.array([5.0, 0.0, 0.0]), self.a, self.b))
+
+    def test_point_off_axis(self):
+        self.assertFalse(
+            _point_on_segment_xz(np.array([2.0, 0.0, 1.0]), self.a, self.b))
+
+    def test_within_tolerance(self):
+        # Just barely on the segment within default tol
+        self.assertTrue(
+            _point_on_segment_xz(
+                np.array([2.0, 0.0, 0.04]), self.a, self.b, tol=0.05))
+
+    def test_outside_tolerance(self):
+        self.assertFalse(
+            _point_on_segment_xz(
+                np.array([2.0, 0.0, 0.1]), self.a, self.b, tol=0.05))
+
+    def test_zero_length_segment(self):
+        a = np.array([1.0, 0.0, 1.0])
+        # Point exactly at zero-length segment position — always True
+        self.assertTrue(_point_on_segment_xz(
+            np.array([1.0, 0.0, 1.0]), a, a, tol=0.01))
+        self.assertTrue(_point_on_segment_xz(
+            np.array([1.0, 0.0, 1.0]), a, a, tol=0.0))
+        # Point away from zero-length segment, tight tolerance — False
+        self.assertFalse(_point_on_segment_xz(
+            np.array([1.1, 0.0, 1.1]), a, a, tol=0.01))
+
+    def test_diagonal_segment(self):
+        a = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        b = np.array([3.0, 0.0, 4.0], dtype=np.float64)
+        self.assertTrue(
+            _point_on_segment_xz(np.array([1.5, 0.0, 2.0]), a, b))
+
+    def test_y_coordinate_ignored(self):
+        # Y values differ greatly; XZ projection is what matters
+        self.assertTrue(
+            _point_on_segment_xz(
+                np.array([2.0, 50.0, 0.0]),
+                np.array([0.0, -10.0, 0.0]),
+                np.array([4.0, 30.0, 0.0])))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ray_intersect_floor
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestRayIntersectFloor(unittest.TestCase):
+    def setUp(self):
+        self.room = _make_room_data()  # cameraHeight=1.6
+
+    def test_ray_from_origin_to_floor(self):
+        origin = np.array([0.0, 0.0, 0.0])
+        direction = np.array([0.0, 0.8, -0.6])  # downward-forward
+        direction = direction / np.linalg.norm(direction)
+        p = ray_intersect_floor(origin, direction, self.room)
+        self.assertAlmostEqual(p[1], 1.6)  # floor height
+
+    def test_ray_from_above_floor(self):
+        origin = np.array([0.0, 3.0, 0.0])
+        direction = np.array([0.0, -1.0, 0.0])
+        p = ray_intersect_floor(origin, direction, self.room)
+        self.assertAlmostEqual(p[1], 1.6)
+        self.assertAlmostEqual(p[0], 0.0)
+        self.assertAlmostEqual(p[2], 0.0)
+
+    def test_point_is_on_ray_line(self):
+        origin = np.array([0.5, 0.3, 0.0])
+        direction = np.array([0.1, 0.7, 0.3])
+        direction = direction / np.linalg.norm(direction)
+        p = ray_intersect_floor(origin, direction, self.room)
+        # Reconstruct t and verify
+        t_est = (1.6 - origin[1]) / direction[1]
+        np.testing.assert_allclose(p, origin + t_est * direction, atol=1e-10)
+
+    def test_ray_parallel_to_floor_raises(self):
+        origin = np.array([0.0, 2.0, 0.0])
+        direction = np.array([1.0, 0.0, 0.0])
+        with self.assertRaises(ValueError):
+            ray_intersect_floor(origin, direction, self.room)
+
+    def test_ray_away_from_floor_raises(self):
+        origin = np.array([0.0, 2.0, 0.0])
+        direction = np.array([0.0, 1.0, 0.0])
+        with self.assertRaises(ValueError):
+            ray_intersect_floor(origin, direction, self.room)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ray_intersect_wall
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestRayIntersectWall(unittest.TestCase):
+    def setUp(self):
+        self.room = _make_room_data()  # 4m x 3m room, camera at origin
+
+    def test_hits_front_wall(self):
+        origin = np.zeros(3)
+        direction = np.array([0.0, 0.0, -1.0])  # toward -Z
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNotNone(hit)
+        self.assertAlmostEqual(hit[2], -1.5, delta=0.05)
+        self.assertAlmostEqual(hit[0], 0.0, delta=0.05)
+
+    def test_hits_back_wall(self):
+        origin = np.zeros(3)
+        direction = np.array([0.0, 0.0, 1.0])  # toward +Z
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNotNone(hit)
+        self.assertAlmostEqual(hit[2], 1.5, delta=0.05)
+
+    def test_hits_left_wall(self):
+        origin = np.zeros(3)
+        direction = np.array([-1.0, 0.0, 0.0])  # toward -X
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNotNone(hit)
+        self.assertAlmostEqual(hit[0], -2.0, delta=0.05)
+
+    def test_hits_right_wall(self):
+        origin = np.zeros(3)
+        direction = np.array([1.0, 0.0, 0.0])  # toward +X
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNotNone(hit)
+        self.assertAlmostEqual(hit[0], 2.0, delta=0.05)
+
+    def test_diagonal_hit(self):
+        origin = np.zeros(3)
+        direction = np.array([1.0, 0.0, -1.0])
+        direction = direction / np.linalg.norm(direction)
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNotNone(hit)
+
+    def test_ray_from_offset_origin(self):
+        origin = np.array([1.0, 0.0, 0.0])
+        direction = np.array([1.0, 0.0, 0.0])  # toward right wall
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNotNone(hit)
+        self.assertAlmostEqual(hit[0], 2.0, delta=0.05)
+
+    def test_returns_none_when_no_hit(self):
+        # Point the ray where there is no wall (room has only 4 walls)
+        origin = np.array([10.0, 0.0, 10.0])
+        direction = np.array([1.0, 0.0, 1.0])
+        direction = direction / np.linalg.norm(direction)
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNone(hit)
+
+    def test_return_wall_true(self):
+        origin = np.zeros(3)
+        direction = np.array([0.0, 0.0, -1.0])
+        hit, wall = ray_intersect_wall(origin, direction, self.room, return_wall=True)
+        self.assertIsNotNone(hit)
+        self.assertIsNotNone(wall)
+        self.assertIn("planeEquation", wall)
+        self.assertIn("pointsIdx", wall)
+
+    def test_return_wall_true_none(self):
+        origin = np.array([10.0, 0.0, 10.0])
+        direction = np.array([1.0, 0.0, 1.0])
+        direction = direction / np.linalg.norm(direction)
+        hit, wall = ray_intersect_wall(origin, direction, self.room, return_wall=True)
+        self.assertIsNone(hit)
+        self.assertIsNone(wall)
+
+    def test_hits_nearest_wall(self):
+        """When ray hits multiple walls, return the nearest one."""
+        origin = np.array([0.0, 0.0, 0.0])
+        # Diagonal toward a corner — should hit one wall first
+        direction = np.array([0.5, 0.0, -0.5])
+        direction = direction / np.linalg.norm(direction)
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNotNone(hit)
+        # Should be closer than the far corner
+        dist = np.linalg.norm(hit)
+        self.assertLess(dist, 5.0)
+
+    def test_ray_above_ceiling_no_hit(self):
+        origin = np.array([0.0, 3.0, 0.0])
+        direction = np.array([1.0, 0.0, 0.0])
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNone(hit)
+
+    def test_ray_below_floor_no_hit(self):
+        origin = np.array([0.0, -3.0, 0.0])
+        direction = np.array([1.0, 0.0, 0.0])
+        hit = ray_intersect_wall(origin, direction, self.room)
+        self.assertIsNone(hit)
+
+    def test_ray_hits_within_height_bounds(self):
+        """Ray at camera height (1.6m) hits wall segment that spans floor-to-ceiling."""
+        origin = np.zeros(3)
+        direction = np.array([0.0, 0.1, -1.0])
+        direction = direction / np.linalg.norm(direction)
+        hit = ray_intersect_wall(origin, direction, self.room)
+        # Slight upward angle at origin — still within wall height at hit distance
+        self.assertIsNotNone(hit)
 
 
 if __name__ == "__main__":

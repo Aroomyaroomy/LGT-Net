@@ -16,6 +16,8 @@ env/
 .env
 
 checkpoints/
+GroundingDINO/weights/
+Inpaint-Anything/pretrained_models/
 src/output/
 src/inference/
 flagged/

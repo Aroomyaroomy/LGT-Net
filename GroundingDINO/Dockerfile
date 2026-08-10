@@ -131,6 +131,24 @@ print('runtime OK', c, 'torch', torch.__version__, 'cuda', torch.version.cuda, '
 
 COPY app.py app_utils.py ./
 
+# ---------------------------------------------------------------------------
+# Weights are NOT baked into the image — mount ./weights:/opt/groundingdino/weights at runtime.
+# Optional pre-download: docker compose build --build-arg PRELOAD_MODELS=true
+# ---------------------------------------------------------------------------
+RUN mkdir -p /opt/groundingdino/weights
+ARG PRELOAD_MODELS=false
+ARG DINO_WEIGHT_URL=https://huggingface.co/ShilongLiu/GroundingDINO/resolve/main/groundingdino_swint_ogc.pth
+RUN if [ "$PRELOAD_MODELS" = "true" ]; then \
+        echo "Downloading GroundingDINO weights (662 MB) ..." && \
+        wget -q --show-progress \
+            -O /opt/groundingdino/weights/groundingdino_swint_ogc.pth \
+            "${DINO_WEIGHT_URL}" && \
+        ls -lh /opt/groundingdino/weights/ && \
+        echo "GroundingDINO weights ready."; \
+    else \
+        echo "PRELOAD_MODELS=false — weights must be mounted at /opt/groundingdino/weights"; \
+    fi
+
 EXPOSE 8001
 
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
