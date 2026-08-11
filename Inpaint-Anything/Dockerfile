@@ -43,7 +43,7 @@ COPY app.py lama_inpaint.py ./
 # LaMa requirements from upstream, minus packages provided by the base image
 # and tensorflow (not required for LaMa inference).
 # Pin numpy<2: torch 2.1 wheels expect NumPy 1.x (_ARRAY_API).
-RUN grep -vE '^(torch|torchvision|torchaudio|tensorflow|numpy)([=<[:space:]]|$)' lama/requirements.txt \
+RUN grep -vE '^(torch|torchvision|torchaudio|tensorflow|numpy|scikit-learn|scikit-image)([=<[:space:]]|$)' lama/requirements.txt \
         > /tmp/lama.requirements.txt \
     && python -m pip install --no-cache-dir "setuptools" "numpy<2" "scikit-learn" "scikit-image" -r /tmp/lama.requirements.txt \
     && rm /tmp/lama.requirements.txt \
