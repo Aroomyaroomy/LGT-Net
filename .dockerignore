@@ -49,6 +49,26 @@ viz3d.py
 viz3d_pointcloud.py
 convert_ckpt.py
 main.py
+run_experiments.py
+run_pipeline.py
+gen_furniture_3d.py
+get_pano_masks.py
+download_weights.py
+pipeline_config.json
+fix_dino.py
 visualization/compare_layout_furniture.py
+visualization/boundary.py
+visualization/grad.py
+visualization/visualizer/
+
+# Separate containers — not needed in LGT-Net build context
+GroundingDINO/
+Inpaint-Anything/
+
+# Experiments / scratch
+experiments/
+investigation_material/
+src/demo/
+src/fig/
 
 docker-compose.override.yml
