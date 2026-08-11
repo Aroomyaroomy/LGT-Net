@@ -31,7 +31,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --index-strategy unsafe-best-match \
     -r /tmp/requirements-no-torch.txt
 
-COPY app.py inference.py reposition.py /app/
+COPY app.py inference.py /app/
 COPY config /app/config
 COPY dataset /app/dataset
 COPY evaluation /app/evaluation
@@ -42,6 +42,7 @@ COPY preprocessing /app/preprocessing
 COPY utils /app/utils
 COPY visualization /app/visualization
 COPY src/config /app/src/config
+COPY reposition /app/reposition
 
 # explicitly create output and checkpoint dirs
 # Weights are NOT baked into the image — mount ./checkpoints:/app/checkpoints at runtime.

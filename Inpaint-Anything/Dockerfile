@@ -45,9 +45,9 @@ COPY app.py lama_inpaint.py ./
 # Pin numpy<2: torch 2.1 wheels expect NumPy 1.x (_ARRAY_API).
 RUN grep -vE '^(torch|torchvision|torchaudio|tensorflow|numpy)([=<[:space:]]|$)' lama/requirements.txt \
         > /tmp/lama.requirements.txt \
-    && python -m pip install --no-cache-dir "numpy<2" -r /tmp/lama.requirements.txt \
+    && python -m pip install --no-cache-dir "setuptools" "numpy<2" "scikit-learn" "scikit-image" -r /tmp/lama.requirements.txt \
     && rm /tmp/lama.requirements.txt \
-    && python -c "import numpy, cv2, omegaconf, pytorch_lightning; \
+    && python -c "import numpy, cv2, omegaconf, pytorch_lightning, saicinpainting; \
 print('deps OK', 'numpy', numpy.__version__)"
 
 # FastAPI inference server (app.py) — not in upstream LaMa requirements.
