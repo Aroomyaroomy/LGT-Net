@@ -66,7 +66,8 @@ print('groundingdino._C OK', c, groundingdino.__file__)" \
     && for p in /usr/local/lib/python3.10/dist-packages/*; do \
          case "$(basename "$p")" in \
            pip|pip-*|setuptools|setuptools-*|wheel|wheel-*|pkg_resources|_distutils*|easy_install.py|distutils-precedence.pth) continue ;; \
-           *) cp -a "$p" /opt/export/ ;; \
+           torch|torchvision|triton|numpy|groundingdino|typing_extensions|filelock|fsspec|sympy|networkx|jinja2|markupsafe|mpmath|pillow|requests|charset_normalizer|idna|urllib3|certifi) cp -a "$p" /opt/export/ ;;
+	           *) continue ;; \
          esac; \
        done \
     && test -d /opt/export/torch \
