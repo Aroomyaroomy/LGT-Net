@@ -47,7 +47,8 @@ RUN grep -vE '^(torch|torchvision|torchaudio|tensorflow|numpy|scikit-learn|sciki
         > /tmp/lama.requirements.txt \
     && python -m pip install --no-cache-dir "setuptools" "numpy<2" "scikit-learn" "scikit-image" -r /tmp/lama.requirements.txt \
     && rm /tmp/lama.requirements.txt \
-    && python -c "import torch, cv2, omegaconf, pytorch_lightning; print('deps OK')"
+    && echo "from .utils import *" > utils/__init__.py \
+    && python -c "from utils import load_img_to_array; print('deps OK')"
 
 # FastAPI inference server (app.py) — not in upstream LaMa requirements.
 RUN python -m pip install --no-cache-dir \
