@@ -47,9 +47,8 @@ RUN grep -vE '^(torch|torchvision|torchaudio|tensorflow|numpy|scikit-learn|sciki
         > /tmp/lama.requirements.txt \
     && python -m pip install --no-cache-dir "setuptools" "numpy<2" "scikit-learn" "scikit-image" -r /tmp/lama.requirements.txt \
     && rm /tmp/lama.requirements.txt \
-    && python -m pip uninstall -y saicinpainting 2>/dev/null; true \
-    && touch lama/saicinpainting/__init__.py \
-    && python -c "import sys; sys.path.insert(0,'/opt/inpaint-anything/lama'); from saicinpainting.training.trainers import load_checkpoint; print('deps OK')"
+    && touch lama/saicinpainting/__init__.py lama/saicinpainting/training/trainers/__init__.py \
+    && python -c "from saicinpainting.training.trainers import load_checkpoint; print('deps OK')"
 
 # FastAPI inference server (app.py) — not in upstream LaMa requirements.
 RUN python -m pip install --no-cache-dir \
