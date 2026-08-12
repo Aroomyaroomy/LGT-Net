@@ -12,20 +12,29 @@ import time
 from typing import Any, Dict, List, Optional
 
 # =============================================================================
-# CONFIG — edit these
+# CONFIG — loads from pipeline_config.json, override IMAGE_URL below
 # =============================================================================
-IMAGE_URL = (
+import json as _json
+
+with open("pipeline_config.json") as f:
+    CFG = _json.load(f)
+
+IMAGE_URL = CFG["image_url"] or (
     "https://this-is-a-valid-bucket-name-651697298829-ap-northeast-1-an"
     ".s3.ap-northeast-1.amazonaws.com/kitchen.jpg"
 )
-TEXT_PROMPT = "furniture"
 
-DINO_URL = "http://localhost:8001"
-INPAINT_URL = "http://localhost:8002"
-LGT_URL = "http://localhost:8000"
-SAM_MASK_URL = "https://ai-test.aroomy.com/api/sam3d/masks"
-SAM3D_URL = "https://ai-test.aroomy.com/api/sam3d"
-API_KEY = "dev-local-test-key-16chars"
+TEXT_PROMPT = CFG["dino"]["text_prompt"]
+BOX_THRESHOLD = CFG["dino"]["box_threshold"]
+TEXT_THRESHOLD = CFG["dino"]["text_threshold"]
+CROP_SIZE = CFG["inpaint"]["crop_size"]
+
+DINO_URL = CFG["dino"]["service_url"]
+INPAINT_URL = CFG["inpaint"]["service_url"]
+LGT_URL = CFG["lgt_net"]["service_url"]
+SAM_MASK_URL = CFG["sam"]["service_url"]
+SAM3D_URL = CFG["sam3d"]["service_url"]
+API_KEY = CFG["api_key"]
 
 # =============================================================================
 # HELPERS
@@ -48,7 +57,7 @@ async def step1_dino(image_bytes: bytes) -> dict:
             f"{DINO_URL}/predict",
             headers={"X-API-KEY": API_KEY},
             files={"image": ("pano.jpg", image_bytes, "image/jpeg")},
-            data={"text_prompt": TEXT_PROMPT, "box_threshold": "0.3", "text_threshold": "0.25"},
+            data={"text_prompt": TEXT_PROMPT, "box_threshold": str(BOX_THRESHOLD), "text_threshold": str(TEXT_THRESHOLD)},
         )
         r.raise_for_status()
         data = r.json()
