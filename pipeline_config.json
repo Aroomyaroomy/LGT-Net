@@ -1,12 +1,12 @@
 {
   "image_url": "",
   "root_dir": "small_square_room_test",
-  "api_key": "dev-only-insecure-key",
+  "api_key": "dev-local-test-key-16chars",
   "dino": {
     "service_url": "http://localhost:8001",
-    "text_prompt": "air conditioner. wall-mounted cabinet. wall-mounted lamp. ceiling lamp .  ",
-    "box_threshold": 0.3,
-    "text_threshold": 0.25,
+    "text_prompt": "cabinet. counter. stove. sink. table. chair. refrigerator.",
+    "box_threshold": 0.25,
+    "text_threshold": 0.20,
     "visualize": false,
     "download_boxes": false,
     "token_spans": null
