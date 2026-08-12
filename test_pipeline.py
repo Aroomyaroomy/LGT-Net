@@ -18,7 +18,7 @@ IMAGE_URL = (
     "https://this-is-a-valid-bucket-name-651697298829-ap-northeast-1-an"
     ".s3.ap-northeast-1.amazonaws.com/kitchen.jpg"
 )
-TEXT_PROMPT = "sofa. chair. table."
+TEXT_PROMPT = "furniture"
 
 DINO_URL = "http://localhost:8001"
 INPAINT_URL = "http://localhost:8002"
