@@ -15,7 +15,6 @@ from reposition.sam_utils import (
     object_height_from_sam3d,
     quat_xyzw_to_rotation_matrix,
     rotation_about_axis,
-    rotation_aligning_vectors,
     sam3d_orientation_to_obj3d,
     signed_angle_about_axis,
 )
@@ -81,42 +80,6 @@ class TestQuatToRotationMatrix(unittest.TestCase):
     def test_tuple_input(self):
         R = quat_xyzw_to_rotation_matrix((0.0, 0.0, 0.0, 1.0))
         np.testing.assert_allclose(R, np.eye(3), atol=1e-10)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# rotation_aligning_vectors
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestRotationAligningVectors(unittest.TestCase):
-    def test_same_direction_identity(self):
-        R = rotation_aligning_vectors(
-            np.array([1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]))
-        np.testing.assert_allclose(R, np.eye(3), atol=1e-10)
-
-    def test_opposite_direction_180(self):
-        R = rotation_aligning_vectors(
-            np.array([1.0, 0.0, 0.0]), np.array([-1.0, 0.0, 0.0]))
-        np.testing.assert_allclose(
-            R @ [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], atol=1e-10)
-
-    def test_90_degree_rotation(self):
-        R = rotation_aligning_vectors(
-            np.array([1.0, 0.0, 0.0]), np.array([0.0, 0.0, 1.0]))
-        np.testing.assert_allclose(
-            R @ [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], atol=1e-10)
-
-    def test_result_is_orthogonal(self):
-        R = rotation_aligning_vectors(
-            np.array([0.6, 0.8, 0.0]),
-            np.array([-0.3, 0.4, np.sqrt(1 - 0.25)]))
-        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
-        np.testing.assert_allclose(np.linalg.det(R), 1.0, atol=1e-10)
-
-    def test_unnormalized_inputs(self):
-        R = rotation_aligning_vectors(
-            np.array([5.0, 0.0, 0.0]), np.array([0.0, 3.0, 0.0]))
-        np.testing.assert_allclose(
-            R @ [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], atol=1e-10)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

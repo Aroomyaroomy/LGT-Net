@@ -1,6 +1,5 @@
 """Unit tests for reposition.reposition — furniture placement orchestration."""
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +12,6 @@ from reposition.reposition import (
     get_masks,
     load_aligned_binary_mask,
     placements_from_mask_dir,
-    preprocess_masks,
     resolve_standing_pose,
     resolve_standing_rotation,
 )
@@ -150,7 +148,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         uv = np.array([0.5, 0.6])
         binary = _centered_mask()
 
-        p, method = freestanding_floor_translation(
+        p, method, _ = freestanding_floor_translation(
             origin, direction, uv, binary, self.room, self.depth)
         self.assertIsNotNone(p)
         self.assertEqual(method, "floor")
@@ -163,7 +161,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         uv = np.array([0.5, 0.52])
         binary = _centered_mask()
 
-        p, method = freestanding_floor_translation(
+        p, method, _ = freestanding_floor_translation(
             origin, direction, uv, binary, self.room, self.depth)
         self.assertIsNotNone(p)
         # Should be inside the room footprint
@@ -182,7 +180,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         mask[400:440, 500:520] = True  # small angular height
 
         # Object height = 1.0m, angular height of mask ≈ (40/512)*π ≈ 0.245 rad
-        p, method = freestanding_floor_translation(
+        p, method, _ = freestanding_floor_translation(
             origin, direction, uv, mask, self.room, self.depth,
             object_height=1.0)
         self.assertIsNotNone(p)
@@ -197,7 +195,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         uv = np.array([0.5, 0.85])
         binary = _bottom_mask()
 
-        p, method = freestanding_floor_translation(
+        p, method, _ = freestanding_floor_translation(
             origin, direction, uv, binary, self.room, self.depth,
             object_height=None)
         self.assertIsNotNone(p)
@@ -211,7 +209,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         uv = np.array([0.5, 0.6])
         binary = _centered_mask()
 
-        p, method = freestanding_floor_translation(
+        p, method, _ = freestanding_floor_translation(
             origin, direction, uv, binary, self.room, depth=None)
         self.assertIsNone(p)
         self.assertIsNone(method)
@@ -223,7 +221,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         uv = np.array([0.55, 0.55])
         binary = _centered_mask()
 
-        p, _ = freestanding_floor_translation(
+        p, _, _ = freestanding_floor_translation(
             origin, direction, uv, binary, self.room, self.depth)
         self.assertIsNotNone(p)
         self.assertAlmostEqual(p[1], 1.6)
@@ -237,7 +235,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         uv = np.array([0.5, 0.52])
         binary = _centered_mask()
 
-        p, method = freestanding_floor_translation(
+        p, method, _ = freestanding_floor_translation(
             origin, direction, uv, binary, room, depth)
         self.assertIsNotNone(p)
         self.assertAlmostEqual(p[1], 1.2)
@@ -254,8 +252,8 @@ class TestResolveStandingTranslation(unittest.TestCase):
 
     def test_centered_mask_placed_on_floor(self):
         binary = _centered_mask()
-        t, uv, surface, _, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth)
+        t, uv, surface, _, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, object_height=1.0)
         self.assertIsNotNone(t)
         self.assertIsNotNone(uv)
         self.assertEqual(surface, "floor")
@@ -263,8 +261,8 @@ class TestResolveStandingTranslation(unittest.TestCase):
 
     def test_wall_mask_placed_on_wall(self):
         binary = _wall_mask()
-        t, uv, surface, _, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth)
+        t, uv, surface, _, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, object_height=1.0)
         self.assertIsNotNone(t)
         self.assertIsNotNone(uv)
         # Left-side mask may hit wall or floor depending on geometry
@@ -272,7 +270,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
 
     def test_empty_mask_returns_none(self):
         binary = np.zeros((512, 1024), dtype=bool)
-        t, uv, surface, _, _ = resolve_standing_pose(
+        t, uv, surface, _, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         self.assertIsNone(t)
         self.assertIsNone(uv)
@@ -281,7 +279,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
     def test_without_depth_still_works(self):
         """Without depth, falls back to legacy floor hit or wall."""
         binary = _centered_mask()
-        t, uv, surface, _, _ = resolve_standing_pose(
+        t, uv, surface, _, _, _ = resolve_standing_pose(
             binary, self.room, depth=None)
         # May or may not find a placement depending on mask position
         if t is not None:
@@ -290,16 +288,16 @@ class TestResolveStandingTranslation(unittest.TestCase):
     def test_custom_origin(self):
         binary = _centered_mask()
         origin = np.array([0.0, 0.0, 0.0])
-        t, uv, surface, _, _ = resolve_standing_pose(
-            binary, self.room, origin=origin, depth=self.depth)
+        t, uv, surface, _, _, _ = resolve_standing_pose(
+            binary, self.room, origin=origin, depth=self.depth, object_height=1.0)
         self.assertIsNotNone(t)
         self.assertEqual(surface, "floor")
 
     def test_translation_inside_room_footprint(self):
         from reposition.lgt_utils import check_floor_hit
         binary = _centered_mask()
-        t, _, surface, _, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth)
+        t, _, surface, _, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, object_height=1.0)
         if surface == "floor" and t is not None:
             self.assertTrue(
                 check_floor_hit(t, self.room),
@@ -317,8 +315,8 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_full_pose_for_centered_mask(self):
         binary = _centered_mask()
-        t, uv, surface, rotation, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth)
+        t, uv, surface, rotation, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, object_height=1.0)
         self.assertIsNotNone(t)
         self.assertIsNotNone(uv)
         self.assertIsNotNone(surface)
@@ -330,7 +328,7 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_empty_mask_returns_none(self):
         binary = np.zeros((512, 1024), dtype=bool)
-        t, uv, surface, rotation, _ = resolve_standing_pose(
+        t, uv, surface, rotation, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         self.assertIsNone(t)
         self.assertIsNone(uv)
@@ -339,23 +337,23 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_rotation_matrix_is_orthogonal(self):
         binary = _centered_mask()
-        _, _, _, rotation, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth)
+        _, _, _, rotation, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, object_height=1.0)
         if rotation is not None:
             R = np.array(rotation["matrix"])
             np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
 
     def test_translation_on_floor(self):
         binary = _centered_mask()
-        t, _, surface, _, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth)
+        t, _, surface, _, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, object_height=1.0)
         if surface == "floor":
             self.assertAlmostEqual(t[1], 1.6)
 
     def test_with_object_height(self):
         binary = np.zeros((512, 1024), dtype=bool)
         binary[200:280, 450:550] = True  # 80px vertical span
-        t, uv, surface, rotation, _ = resolve_standing_pose(
+        t, uv, surface, rotation, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth, object_height=1.5)
         self.assertIsNotNone(t)
         self.assertIsNotNone(rotation)
@@ -363,7 +361,7 @@ class TestResolveStandingPose(unittest.TestCase):
     def test_no_depth_fallback(self):
         """Without depth, resolves pose via legacy floor/wall path."""
         binary = _centered_mask()
-        t, uv, surface, rotation, _ = resolve_standing_pose(
+        t, uv, surface, rotation, _, _ = resolve_standing_pose(
             binary, self.room, depth=None)
         # Centered mask → near-horizontal ray; may hit wall or floor
         self.assertIsNotNone(t)
@@ -372,10 +370,10 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_pose_with_custom_num_samples(self):
         binary = _centered_mask()
-        t1, _, _, _, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth, num_samples=1)
-        t3, _, _, _, _ = resolve_standing_pose(
-            binary, self.room, depth=self.depth, num_samples=3)
+        t1, _, _, _, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, num_samples=1, object_height=1.0)
+        t3, _, _, _, _, _ = resolve_standing_pose(
+            binary, self.room, depth=self.depth, num_samples=3, object_height=1.0)
         self.assertIsNotNone(t1)
         self.assertIsNotNone(t3)
 
@@ -383,8 +381,8 @@ class TestResolveStandingPose(unittest.TestCase):
         room = _make_room_data(camera_height=1.6, hw=5.0, hd=4.0)
         depth = _dummy_depth(wall_dist=5.0)
         binary = _centered_mask(size=60)
-        t, uv, surface, rotation, _ = resolve_standing_pose(
-            binary, room, depth=depth)
+        t, uv, surface, rotation, _, _ = resolve_standing_pose(
+            binary, room, depth=depth, object_height=1.0)
         self.assertIsNotNone(t)
         self.assertIsNotNone(rotation)
 
@@ -525,66 +523,6 @@ class TestLoadAlignedBinaryMask(unittest.TestCase):
         Image.fromarray(img).save(path)
         binary = load_aligned_binary_mask(path, do_manhattan=False)
         self.assertEqual(binary.shape, (512, 1024))
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# preprocess_masks
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestPreprocessMasks(unittest.TestCase):
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.tmp = Path(self.tmpdir.name)
-
-    def tearDown(self):
-        self.tmpdir.cleanup()
-
-    def _create_mask(self, name: str, u_center=500, v_center=250, size=50):
-        """Create a mask PNG with a white blob at the given pixel position."""
-        path = self.tmp / name
-        img = np.zeros((512, 1024, 3), dtype=np.uint8)
-        half = size // 2
-        img[v_center - half:v_center + half,
-            u_center - half:u_center + half] = 255
-        Image.fromarray(img).save(path)
-        return path
-
-    def test_returns_uvs_for_masks(self):
-        self._create_mask("mask_0.png", u_center=500, v_center=256)
-        self._create_mask("mask_1.png", u_center=700, v_center=128)
-        paths = sorted(self.tmp.glob("mask_*.png"),
-                       key=lambda x: int(x.stem.split("_")[1]))
-
-        uvs = preprocess_masks(paths, do_manhattan=False)
-        self.assertEqual(len(uvs), 2)
-        for uv in uvs:
-            self.assertEqual(len(uv), 2)
-            self.assertTrue(0.0 <= uv[0] <= 1.0)
-            self.assertTrue(0.0 <= uv[1] <= 1.0)
-
-    def test_skips_empty_masks(self):
-        self._create_mask("mask_0.png", u_center=500, v_center=256)
-        # Create an all-black mask
-        path = self.tmp / "mask_1.png"
-        Image.fromarray(np.zeros((512, 1024, 3), dtype=np.uint8)).save(path)
-
-        paths = sorted(self.tmp.glob("mask_*.png"),
-                       key=lambda x: int(x.stem.split("_")[1]))
-        uvs = preprocess_masks(paths, do_manhattan=False)
-        self.assertEqual(len(uvs), 1)
-
-    def test_centroid_position_plausible(self):
-        """UVs for a centered blob should be near (0.5, 0.5)."""
-        self._create_mask("mask_0.png", u_center=512, v_center=256)
-        paths = list(self.tmp.glob("mask_*.png"))
-        uvs = preprocess_masks(paths, do_manhattan=False)
-        self.assertEqual(len(uvs), 1)
-        # UV should be near center
-        self.assertAlmostEqual(uvs[0][0], 0.5, delta=0.05)
-        self.assertAlmostEqual(uvs[0][1], 0.5, delta=0.05)
-
-    def test_empty_list(self):
-        self.assertEqual(preprocess_masks([], do_manhattan=False), [])
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -100,32 +100,6 @@ def quat_xyzw_to_rotation_matrix(quat) -> np.ndarray:
     )
 
 
-def rotation_aligning_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Smallest rotation ``R`` such that ``R @ a`` is parallel to ``b``."""
-    a = _normalize(a)
-    b = _normalize(b)
-    cross = np.cross(a, b)
-    dot = float(np.dot(a, b))
-    if dot < -1.0 + 1e-9:
-        # 180°: pick any axis orthogonal to a
-        axis = np.cross(a, np.array([1.0, 0.0, 0.0]))
-        if np.linalg.norm(axis) < 1e-6:
-            axis = np.cross(a, np.array([0.0, 1.0, 0.0]))
-        axis = _normalize(axis)
-        return cv2.Rodrigues(axis * np.pi)[0].astype(np.float64)
-    if np.linalg.norm(cross) < 1e-12:
-        return np.eye(3, dtype=np.float64)
-    skew = np.array(
-        [
-            [0.0, -cross[2], cross[1]],
-            [cross[2], 0.0, -cross[0]],
-            [-cross[1], cross[0], 0.0],
-        ],
-        dtype=np.float64,
-    )
-    return np.eye(3, dtype=np.float64) + skew + skew @ skew * ((1.0 - dot) / (np.dot(cross, cross)))
-
-
 def signed_angle_about_axis(a: np.ndarray, b: np.ndarray, axis: np.ndarray) -> float:
     """Signed angle from ``a`` to ``b`` about ``axis`` (radians)."""
     axis = _normalize(axis)
