@@ -32,6 +32,10 @@ from .sam_utils import (
     mask_index_from_name,
     object_height_from_sam3d,
 )
+from .quality_control import (
+    apply_placement_quality,
+    mark_quality_rejections,
+)
 
 
 def get_masks(mask_dir: Path) -> list[Path]:
@@ -109,6 +113,8 @@ def placements_from_mask_dir(
     num_samples: int = 5,
     sam3d_metadata: dict[int, dict] | Path | str | None = None,
     furniture_dir: Path | str | None = None,
+    dino_boxes: dict | list | Path | str | None = None,
+    min_score: float | None = None,
 ) -> tuple[list[dict], int, int]:
     """
     For each mask_*.png under mask_dir, run resolve_standing_pose and
@@ -117,14 +123,17 @@ def placements_from_mask_dir(
 
     Optional SAM3D ``metadata`` / ``furniture_dir`` supply per-object heights
     for angular-size freestanding ranging and room-distance mesh scaling.
+    Optional ``dino_boxes`` enables Plan A label/surface quality checks.
 
     Graceful failure policy (per component):
       - translation unresolved → skip object (never place at origin)
       - scale unresolved → skip object (never invent a bare scale=1.0)
       - rotation unresolved → keep object; default upright orientation is
         already applied inside ``resolve_standing_pose``
+      - quality-control reject → skip object; reason written to ``error``
 
-    ``failure`` counts skipped objects; ``success`` counts renderable ones.
+    ``failure`` counts skipped objects (unresolved pose **or** QC reject);
+    ``success`` counts renderable ones that pass quality.
     """
     mask_dir = Path(mask_dir)
     metadata = None
@@ -136,8 +145,6 @@ def placements_from_mask_dir(
         )
 
     placements = []
-    success = 0
-    failure = 0
     for path in get_masks(mask_dir):
         record = {
             'mask': path.name,
@@ -154,13 +161,11 @@ def placements_from_mask_dir(
         except Exception as exc:
             record['error'] = str(exc)
             placements.append(record)
-            failure += 1
             continue
 
         if not binary.any():
             record['error'] = 'empty mask'
             placements.append(record)
-            failure += 1
             continue
 
         idx = mask_index_from_name(path.name)
@@ -187,7 +192,6 @@ def placements_from_mask_dir(
                 reason.append('scale')
             record['error'] = f"unresolved: {', '.join(reason)}"
             placements.append(record)
-            failure += 1
             continue
 
         record['translation'] = np.asarray(translation, dtype=np.float64).reshape(3).tolist()
@@ -197,8 +201,16 @@ def placements_from_mask_dir(
         record['rotation'] = rotation
         record['scale'] = scale
         placements.append(record)
-        success += 1
 
+    # Plan A/B/C: annotate quality, then fold rejects into error + failure count.
+    placements = apply_placement_quality(
+        placements,
+        boxes=dino_boxes,
+        layout=data,
+        min_score=min_score,
+        drop_rejected=False,
+    )
+    placements, success, failure = mark_quality_rejections(placements)
     return placements, success, failure
 
 
