@@ -76,7 +76,11 @@ def _write_mask_png(path: Path, binary: np.ndarray) -> None:
 
 
 def _is_renderable(placement: dict) -> bool:
-    """Renderer-safe: finite translation and resolved scale factor."""
+    """Renderer-safe: finite translation, resolved scale, and not QC-rejected."""
+    if placement.get("error"):
+        return False
+    if (placement.get("quality") or {}).get("keep") is False:
+        return False
     t = placement.get("translation")
     s = placement.get("scale")
     if t is None or not isinstance(s, dict) or s.get("factor") is None:

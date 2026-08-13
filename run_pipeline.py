@@ -27,10 +27,12 @@ from get_pano_masks import (
 )
 from gen_furniture_3d import wait_and_fetch_3d_job, submit_3d_job
 from reposition import (
+    apply_placement_quality,
     height_from_angular_size,
     json_frame_to_obj3d,
     json_rotation_to_obj3d,
     load_sam3d_metadata,
+    mark_quality_rejections,
     merge_sam3d_orientations_into_placements,
     placement_to_obj3d_frame,
     uprightness_metrics,
@@ -453,7 +455,7 @@ def run_lgt_net(
             "output_mesh": str(output_mesh).lower(),
             "output_point_cloud": str(output_point_cloud).lower(),
         },
-        timeout=300,
+        timeout=900,
     )
     predict_response.raise_for_status()
     predict_data = predict_response.json()
@@ -699,6 +701,46 @@ def run_pipeline_from_config(config: dict) -> dict:
         )
         lgt_net_result = {**lgt_net_result, "placements": merged}
 
+    # Plan A + B + C quality: label/surface, layout geometry, inter-object clip.
+    # QC rejects are folded into record['error'] and placement_success/failure.
+    quality_placements = apply_placement_quality(
+        lgt_net_result.get("placements"),
+        boxes=dino_result.get("boxes"),
+        layout=lgt_net_result.get("coordinates"),
+        min_score=sam_cfg.get("min_score"),
+        drop_rejected=False,
+    )
+    quality_placements, placement_success, placement_failure = mark_quality_rejections(
+        quality_placements
+    )
+    quality_rejected = sum(
+        1
+        for p in quality_placements
+        if not (p.get("quality") or {}).get("keep", True)
+    )
+    lgt_net_result = {
+        **lgt_net_result,
+        "placements": quality_placements,
+        "placement_success": placement_success,
+        "placement_failure": placement_failure,
+        "quality_rejected": quality_rejected,
+    }
+    if quality_rejected:
+        print(
+            f"    [QC] rejected {quality_rejected}/"
+            f"{len(quality_placements)} placement(s) "
+            f"(success={placement_success}, failure={placement_failure})"
+        )
+        for p in quality_placements:
+            q = p.get("quality") or {}
+            if q.get("keep", True):
+                continue
+            print(
+                f"    [QC]   reject {p.get('mask')} "
+                f"label={p.get('label')} surface={p.get('surface')} "
+                f"error={p.get('error')}"
+            )
+
     uprightness_report = evaluate_placement_uprightness(
         lgt_net_result.get("placements")
     )
@@ -714,8 +756,9 @@ def run_pipeline_from_config(config: dict) -> dict:
                 {
                     "job_id": lgt_net_result.get("job_id"),
                     "placements": lgt_net_result.get("placements"),
-                    "placement_success": lgt_net_result.get("placement_success", 0),
-                    "placement_failure": lgt_net_result.get("placement_failure", 0),
+                    "placement_success": placement_success,
+                    "placement_failure": placement_failure,
+                    "quality_rejected": quality_rejected,
                     "uprightness": uprightness_report,
                     "orientation_source": (
                         "sam3d_hybrid"
@@ -746,6 +789,7 @@ def run_pipeline_from_config(config: dict) -> dict:
             show_coordinate_frame=bool(viz_cfg.get("show_coordinate_frame", True)),
             room_transparency=float(viz_cfg.get("room_transparency", 0.4)),
             save_screenshot=viz_cfg.get("save_screenshot"),
+            skip_rejected=bool(viz_cfg.get("skip_rejected", True)),
             verbose=bool(viz_cfg.get("verbose", True)),
         )
 
@@ -759,6 +803,7 @@ def run_pipeline_from_config(config: dict) -> dict:
         "object_dir": object_dir,
         "placement_success": lgt_net_result.get("placement_success", 0),
         "placement_failure": lgt_net_result.get("placement_failure", 0),
+        "quality_rejected": quality_rejected,
         "uprightness": uprightness_report,
         "visualize": viz_geometries,
     }
@@ -773,6 +818,7 @@ def visualize_placed_furniture(
     room_transparency: float = 0.4,
     save_screenshot: Optional[str] = None,
     snap_to_floor: bool = True,
+    skip_rejected: bool = True,
     verbose: bool = True,
 ) -> Optional[List]:
     """
@@ -792,6 +838,8 @@ def visualize_placed_furniture(
     When ``snap_to_floor`` is True (default), freestanding meshes are raised /
     lowered after posing so their AABB bottom sits on the placement floor
     plane (SAM3D pivots are usually mesh-centered).
+    When ``skip_rejected`` is True (default), placements with
+    ``quality.keep is False`` are not drawn.
 
     Uses helpers from ``visualization.compare_layout_furniture``.
 
@@ -804,6 +852,7 @@ def visualize_placed_furniture(
         room_transparency: Room wall opacity blend in ``[0, 1]``.
         save_screenshot: Optional path to capture a still after display setup.
         snap_to_floor: Snap freestanding AABB bottoms to the floor after pose.
+        skip_rejected: Skip placements rejected by quality control.
         verbose: Print load / placement progress.
 
     Returns:
@@ -852,6 +901,14 @@ def visualize_placed_furniture(
     placed = 0
     for i, placement in enumerate(placements):
         mask_name = placement.get("mask") or f"mask_{i}.png"
+        quality = placement.get("quality") or {}
+        if skip_rejected and quality.get("keep") is False:
+            if verbose:
+                fails = ",".join(quality.get("fails") or []) or "quality"
+                label = placement.get("label") or "?"
+                print(f"  [VIZ] skip {mask_name}: rejected ({fails}, label={label})")
+            continue
+
         translation = placement.get("translation")
         rotation = placement.get("rotation") or {}
         if translation is None:
@@ -993,6 +1050,9 @@ def visualize_placed_furniture(
         )
 
     if save_screenshot:
+        out_dir = os.path.dirname(os.path.abspath(save_screenshot))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         vis = o3d.visualization.Visualizer()
         vis.create_window(visible=False, width=1280, height=720)
         for g in geometries:

@@ -16,7 +16,6 @@ from reposition.reposition import (
     preprocess_masks,
     resolve_standing_pose,
     resolve_standing_rotation,
-    resolve_standing_translation,
 )
 
 
@@ -245,7 +244,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# resolve_standing_translation
+# resolve_standing_pose — translation/surface checks
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestResolveStandingTranslation(unittest.TestCase):
@@ -255,7 +254,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
 
     def test_centered_mask_placed_on_floor(self):
         binary = _centered_mask()
-        t, uv, surface = resolve_standing_translation(
+        t, uv, surface, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         self.assertIsNotNone(t)
         self.assertIsNotNone(uv)
@@ -264,7 +263,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
 
     def test_wall_mask_placed_on_wall(self):
         binary = _wall_mask()
-        t, uv, surface = resolve_standing_translation(
+        t, uv, surface, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         self.assertIsNotNone(t)
         self.assertIsNotNone(uv)
@@ -273,7 +272,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
 
     def test_empty_mask_returns_none(self):
         binary = np.zeros((512, 1024), dtype=bool)
-        t, uv, surface = resolve_standing_translation(
+        t, uv, surface, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         self.assertIsNone(t)
         self.assertIsNone(uv)
@@ -282,7 +281,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
     def test_without_depth_still_works(self):
         """Without depth, falls back to legacy floor hit or wall."""
         binary = _centered_mask()
-        t, uv, surface = resolve_standing_translation(
+        t, uv, surface, _, _ = resolve_standing_pose(
             binary, self.room, depth=None)
         # May or may not find a placement depending on mask position
         if t is not None:
@@ -291,7 +290,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
     def test_custom_origin(self):
         binary = _centered_mask()
         origin = np.array([0.0, 0.0, 0.0])
-        t, uv, surface = resolve_standing_translation(
+        t, uv, surface, _, _ = resolve_standing_pose(
             binary, self.room, origin=origin, depth=self.depth)
         self.assertIsNotNone(t)
         self.assertEqual(surface, "floor")
@@ -299,7 +298,7 @@ class TestResolveStandingTranslation(unittest.TestCase):
     def test_translation_inside_room_footprint(self):
         from reposition.lgt_utils import check_floor_hit
         binary = _centered_mask()
-        t, _, surface = resolve_standing_translation(
+        t, _, surface, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         if surface == "floor" and t is not None:
             self.assertTrue(
@@ -318,7 +317,7 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_full_pose_for_centered_mask(self):
         binary = _centered_mask()
-        t, uv, surface, rotation = resolve_standing_pose(
+        t, uv, surface, rotation, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         self.assertIsNotNone(t)
         self.assertIsNotNone(uv)
@@ -331,7 +330,7 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_empty_mask_returns_none(self):
         binary = np.zeros((512, 1024), dtype=bool)
-        t, uv, surface, rotation = resolve_standing_pose(
+        t, uv, surface, rotation, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         self.assertIsNone(t)
         self.assertIsNone(uv)
@@ -340,7 +339,7 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_rotation_matrix_is_orthogonal(self):
         binary = _centered_mask()
-        _, _, _, rotation = resolve_standing_pose(
+        _, _, _, rotation, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         if rotation is not None:
             R = np.array(rotation["matrix"])
@@ -348,7 +347,7 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_translation_on_floor(self):
         binary = _centered_mask()
-        t, _, surface, _ = resolve_standing_pose(
+        t, _, surface, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth)
         if surface == "floor":
             self.assertAlmostEqual(t[1], 1.6)
@@ -356,7 +355,7 @@ class TestResolveStandingPose(unittest.TestCase):
     def test_with_object_height(self):
         binary = np.zeros((512, 1024), dtype=bool)
         binary[200:280, 450:550] = True  # 80px vertical span
-        t, uv, surface, rotation = resolve_standing_pose(
+        t, uv, surface, rotation, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth, object_height=1.5)
         self.assertIsNotNone(t)
         self.assertIsNotNone(rotation)
@@ -364,7 +363,7 @@ class TestResolveStandingPose(unittest.TestCase):
     def test_no_depth_fallback(self):
         """Without depth, resolves pose via legacy floor/wall path."""
         binary = _centered_mask()
-        t, uv, surface, rotation = resolve_standing_pose(
+        t, uv, surface, rotation, _ = resolve_standing_pose(
             binary, self.room, depth=None)
         # Centered mask → near-horizontal ray; may hit wall or floor
         self.assertIsNotNone(t)
@@ -373,9 +372,9 @@ class TestResolveStandingPose(unittest.TestCase):
 
     def test_pose_with_custom_num_samples(self):
         binary = _centered_mask()
-        t1, _, _, _ = resolve_standing_pose(
+        t1, _, _, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth, num_samples=1)
-        t3, _, _, _ = resolve_standing_pose(
+        t3, _, _, _, _ = resolve_standing_pose(
             binary, self.room, depth=self.depth, num_samples=3)
         self.assertIsNotNone(t1)
         self.assertIsNotNone(t3)
@@ -384,7 +383,7 @@ class TestResolveStandingPose(unittest.TestCase):
         room = _make_room_data(camera_height=1.6, hw=5.0, hd=4.0)
         depth = _dummy_depth(wall_dist=5.0)
         binary = _centered_mask(size=60)
-        t, uv, surface, rotation = resolve_standing_pose(
+        t, uv, surface, rotation, _ = resolve_standing_pose(
             binary, room, depth=depth)
         self.assertIsNotNone(t)
         self.assertIsNotNone(rotation)
@@ -598,6 +597,11 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
         self.tmp = Path(self.tmpdir.name)
         self.room = _make_room_data()
         self.depth = _dummy_depth()
+        # Heights so room_distance / angular scale can resolve (no bare scale=1).
+        self.sam3d_meta = {
+            i: {"scale": 1.0, "rotation_xyzw": [0, 0, 0, 1]}
+            for i in range(8)
+        }
 
     def tearDown(self):
         self.tmpdir.cleanup()
@@ -616,14 +620,16 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
         self._create_mask("mask_0.png", u_center=512, v_center=280)
         self._create_mask("mask_1.png", u_center=400, v_center=300)
 
-        results = placements_from_mask_dir(
+        results, success, failure = placements_from_mask_dir(
             self.tmp,
             self.room,
             depth=self.depth,
             do_manhattan=False,
             num_samples=3,
+            sam3d_metadata=self.sam3d_meta,
         )
         self.assertEqual(len(results), 2)
+        self.assertEqual(success + failure, 2)
         for r in results:
             self.assertIn("mask", r)
             self.assertIn("translation", r)
@@ -635,15 +641,18 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
             self.assertIsNotNone(r["surface"])
 
     def test_empty_mask_dir(self):
-        results = placements_from_mask_dir(
+        results, success, failure = placements_from_mask_dir(
             self.tmp, self.room, depth=self.depth, do_manhattan=False)
         self.assertEqual(results, [])
+        self.assertEqual(success, 0)
+        self.assertEqual(failure, 0)
 
     def test_translation_is_serializable(self):
         """Translation should be a plain list, not a numpy array."""
         self._create_mask("mask_0.png", u_center=512, v_center=280)
-        results = placements_from_mask_dir(
-            self.tmp, self.room, depth=self.depth, do_manhattan=False)
+        results, _, _ = placements_from_mask_dir(
+            self.tmp, self.room, depth=self.depth, do_manhattan=False,
+            sam3d_metadata=self.sam3d_meta)
         t = results[0]["translation"]
         self.assertIsInstance(t, list)
         self.assertEqual(len(t), 3)
@@ -652,16 +661,18 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
 
     def test_contact_uv_is_serializable(self):
         self._create_mask("mask_0.png", u_center=512, v_center=280)
-        results = placements_from_mask_dir(
-            self.tmp, self.room, depth=self.depth, do_manhattan=False)
+        results, _, _ = placements_from_mask_dir(
+            self.tmp, self.room, depth=self.depth, do_manhattan=False,
+            sam3d_metadata=self.sam3d_meta)
         uv = results[0]["contact_uv"]
         self.assertIsInstance(uv, list)
         self.assertEqual(len(uv), 2)
 
     def test_rotation_structure(self):
         self._create_mask("mask_0.png", u_center=512, v_center=280)
-        results = placements_from_mask_dir(
-            self.tmp, self.room, depth=self.depth, do_manhattan=False)
+        results, _, _ = placements_from_mask_dir(
+            self.tmp, self.room, depth=self.depth, do_manhattan=False,
+            sam3d_metadata=self.sam3d_meta)
         rotation = results[0]["rotation"]
         self.assertIsNotNone(rotation)
         self.assertIn("yaw", rotation)
@@ -672,8 +683,9 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
     def test_without_depth_still_works(self):
         """Should fall back to legacy floor/wall path."""
         self._create_mask("mask_0.png", u_center=512, v_center=280)
-        results = placements_from_mask_dir(
-            self.tmp, self.room, depth=None, do_manhattan=False)
+        results, _, _ = placements_from_mask_dir(
+            self.tmp, self.room, depth=None, do_manhattan=False,
+            sam3d_metadata=self.sam3d_meta)
         self.assertEqual(len(results), 1)
         self.assertIsNotNone(results[0]["translation"])
 
@@ -681,15 +693,46 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
         for i in range(3):
             self._create_mask(f"mask_{i}.png",
                               u_center=300 + i * 100, v_center=280)
-        results = placements_from_mask_dir(
-            self.tmp, self.room, depth=self.depth, do_manhattan=False)
+        results, _, _ = placements_from_mask_dir(
+            self.tmp, self.room, depth=self.depth, do_manhattan=False,
+            sam3d_metadata=self.sam3d_meta)
         surfaces = [r["surface"] for r in results]
         self.assertTrue(all(s in ("floor", "wall") for s in surfaces))
+
+    def test_qc_reject_sets_error_and_counts_failure(self):
+        """QC rejects fold into record['error'] and placement_failure."""
+        self._create_mask("mask_0.png", u_center=512, v_center=280)
+        boxes = {
+            "detections": [
+                {
+                    "label": "door",
+                    "score": 0.99,
+                    "box": {"xMin": 400, "yMin": 200, "xMax": 600, "yMax": 400},
+                }
+            ]
+        }
+        results, success, failure = placements_from_mask_dir(
+            self.tmp,
+            self.room,
+            depth=self.depth,
+            do_manhattan=False,
+            sam3d_metadata=self.sam3d_meta,
+            dino_boxes=boxes,
+            min_score=0.3,
+        )
+        self.assertEqual(len(results), 1)
+        # Door on floor → surface_class fail → counted as failure with error.
+        if results[0].get("surface") == "floor":
+            self.assertEqual(success, 0)
+            self.assertEqual(failure, 1)
+            err = results[0].get("error") or ""
+            self.assertTrue(err.startswith("quality:"), err)
+            self.assertIn("surface_class", err)
 
     def test_with_sam3d_metadata_dict(self):
         self._create_mask("mask_0.png", u_center=512, v_center=280)
         metadata = {0: {"scale": 1.5, "rotation_xyzw": [0, 0, 0, 1]}}
-        results = placements_from_mask_dir(
+        results, _, _ = placements_from_mask_dir(
             self.tmp, self.room, depth=self.depth, do_manhattan=False,
             sam3d_metadata=metadata)
         self.assertEqual(len(results), 1)
@@ -698,7 +741,6 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
         # Rotation is present and valid
         self.assertIn("yaw", rotation)
         self.assertIn("matrix", rotation)
-
 
 if __name__ == "__main__":
     unittest.main()
