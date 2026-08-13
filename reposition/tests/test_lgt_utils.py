@@ -6,7 +6,6 @@ import unittest
 from reposition.lgt_utils import (
     _normalize,
     _point_on_segment_xz,
-    _wall_y_bounds,
     azimuth_unit_xz,
     check_floor_hit,
     closer_than_wall,
@@ -17,6 +16,7 @@ from reposition.lgt_utils import (
     inward_wall_normal,
     json_frame_to_obj3d,
     json_rotation_to_obj3d,
+    layout_y_bounds,
     mask_angular_height,
     nearest_wall,
     patch_index_from_uv,
@@ -705,27 +705,27 @@ class TestUv2Equirectangular(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _wall_y_bounds
+# layout_y_bounds
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestWallYBounds(unittest.TestCase):
+class TestLayoutYBounds(unittest.TestCase):
     def test_with_explicit_ceiling(self):
         data = {"cameraHeight": 1.6, "cameraCeilingHeight": 1.0, "layoutHeight": 2.6}
-        y_lo, y_hi = _wall_y_bounds(data)
-        self.assertAlmostEqual(y_lo, -1.0)
-        self.assertAlmostEqual(y_hi, 1.6)
+        floor_y, ceiling_y = layout_y_bounds(data)
+        self.assertAlmostEqual(floor_y, 1.6)
+        self.assertAlmostEqual(ceiling_y, -1.0)
 
     def test_fallback_to_layout_height(self):
         data = {"cameraHeight": 1.6, "layoutHeight": 3.0}
-        y_lo, y_hi = _wall_y_bounds(data)
-        self.assertAlmostEqual(y_lo, -1.4)  # -(3.0 - 1.6)
-        self.assertAlmostEqual(y_hi, 1.6)
+        floor_y, ceiling_y = layout_y_bounds(data)
+        self.assertAlmostEqual(floor_y, 1.6)
+        self.assertAlmostEqual(ceiling_y, -1.4)  # -(3.0 - 1.6)
 
     def test_symmetric_room(self):
         data = {"cameraHeight": 1.2, "cameraCeilingHeight": 1.2, "layoutHeight": 2.4}
-        y_lo, y_hi = _wall_y_bounds(data)
-        self.assertAlmostEqual(y_lo, -1.2)
-        self.assertAlmostEqual(y_hi, 1.2)
+        floor_y, ceiling_y = layout_y_bounds(data)
+        self.assertAlmostEqual(floor_y, 1.2)
+        self.assertAlmostEqual(ceiling_y, -1.2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

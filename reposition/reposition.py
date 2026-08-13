@@ -5,7 +5,6 @@ import numpy as np
 from PIL import Image
 
 from inference import preprocess
-from utils.conversion import pixel2uv
 
 from .lgt_utils import (
     azimuth_unit_xz,
@@ -41,13 +40,10 @@ from .quality_control import (
 def get_masks(mask_dir: Path) -> list[Path]:
     if not mask_dir.is_dir():
         raise NotADirectoryError(f"The {mask_dir} is not a directory")
-
-    mask_paths = []
-    for path in mask_dir.iterdir():
-        if path.name.endswith('.png') and path.name.startswith('mask_'):
-            mask_paths.append(path)
-
-    return sorted(mask_paths, key=lambda x: int(x.stem.split('_')[1]))
+    return sorted(
+        (p for p in mask_dir.iterdir() if p.name.startswith("mask_") and p.name.endswith(".png")),
+        key=lambda p: int(p.stem.split("_")[1]),
+    )
 
 
 def load_aligned_binary_mask(
@@ -78,32 +74,6 @@ def load_aligned_binary_mask(
         gray = gray / 255.0
     return gray > 0.5
 
-
-def preprocess_masks(
-    masks_paths: list[Path],
-    do_manhattan: bool = True,
-    vp_cache_path: str = None,
-) -> list[np.ndarray]:
-    """Return centroid contact UVs for each mask (legacy helper)."""
-    contact_uvs = []
-    for path in masks_paths:
-        binary = load_aligned_binary_mask(
-            path, do_manhattan=do_manhattan, vp_cache_path=vp_cache_path
-        )
-        if not binary.any():
-            continue
-        ys, xs = np.where(binary)
-        u_centroid = float(xs.mean())
-        v_centroid = float(ys.mean())
-        contact_uv = pixel2uv(
-            np.array([u_centroid, v_centroid], dtype=np.float64),
-            w=binary.shape[1],
-            h=binary.shape[0],
-        )
-        contact_uvs.append(contact_uv)
-    return contact_uvs
-
-
 def placements_from_mask_dir(
     mask_dir: Path | str,
     data: dict,
@@ -126,8 +96,11 @@ def placements_from_mask_dir(
     Optional ``dino_boxes`` enables Plan A label/surface quality checks.
 
     Graceful failure policy (per component):
-      - translation unresolved → skip object (never place at origin)
-      - scale unresolved → skip object (never invent a bare scale=1.0)
+      - translation unresolved → skip object (never place at origin);
+        ``error`` names the cause (``missing_layout``, ``no_contact_uvs``,
+        ``outside_footprint``, ``no_wall_hit``, …)
+      - scale unresolved → skip object (never invent a bare scale=1.0);
+        ``error`` names the cause (``missing_object_height``, …)
       - rotation unresolved → keep object; default upright orientation is
         already applied inside ``resolve_standing_pose``
       - quality-control reject → skip object; reason written to ``error``
@@ -169,13 +142,13 @@ def placements_from_mask_dir(
             continue
 
         idx = mask_index_from_name(path.name)
-        object_height = None
-        if idx is not None:
-            object_height = object_height_from_sam3d(
-                idx, metadata=metadata, furniture_dir=furniture_dir
-            )
+        object_height = (
+            object_height_from_sam3d(idx, metadata=metadata, furniture_dir=furniture_dir)
+            if idx is not None
+            else None
+        )
 
-        translation, contact_uv, surface, rotation, scale = resolve_standing_pose(
+        translation, contact_uv, surface, rotation, scale, error = resolve_standing_pose(
             binary,
             data,
             depth=depth,
@@ -185,12 +158,10 @@ def placements_from_mask_dir(
         # Skip whenever translation or scale is unresolved — those look broken
         # in the final scene. Rotation alone never causes a skip.
         if translation is None or scale is None:
-            reason = []
-            if translation is None:
-                reason.append('translation')
-            if scale is None:
-                reason.append('scale')
-            record['error'] = f"unresolved: {', '.join(reason)}"
+            record['error'] = error or _unresolved_error(
+                translation_detail="unknown" if translation is None else None,
+                scale_detail="unknown" if scale is None else None,
+            )
             placements.append(record)
             continue
 
@@ -214,36 +185,58 @@ def placements_from_mask_dir(
     return placements, success, failure
 
 
+def _unresolved_error(
+    *,
+    translation_detail: str | None = None,
+    scale_detail: str | None = None,
+) -> str:
+    parts = []
+    if translation_detail:
+        parts.append(f"translation: {translation_detail}")
+    if scale_detail:
+        parts.append(f"scale: {scale_detail}")
+    return f"unresolved: {'; '.join(parts)}" if parts else "unresolved"
+
+
+def _yaw_rotation_dict(
+    yaw: float,
+    normal: np.ndarray,
+    *,
+    source: str | None = None,
+    range_method: str | None = None,
+) -> dict:
+    rec = {
+        "yaw": float(yaw),
+        "matrix": rotation_matrix_yaw(yaw).tolist(),
+        "wall_normal": np.asarray(normal, dtype=np.float64).reshape(3).tolist(),
+    }
+    if source is not None:
+        rec["source"] = source
+    if range_method is not None:
+        rec["range_method"] = range_method
+    return rec
+
+
 def default_standing_rotation(
     translation: np.ndarray,
     range_method: str | None = None,
 ) -> dict:
     """
-    Sensible upright fallback when wall-heuristic rotation cannot be resolved.
+    Upright fallback when wall-heuristic rotation cannot be resolved.
 
-    Yaw so mesh local +Z faces the room center (JSON origin). If the object
-    is already at the origin, use yaw=0. Never returns None — rotation alone
-    must not cause a placement skip.
+    Yaw so mesh local +Z faces the room center (JSON origin). Never returns
+    None — rotation alone must not cause a placement skip.
     """
     t = np.asarray(translation, dtype=np.float64).reshape(3)
     to_center = np.array([-t[0], 0.0, -t[2]], dtype=np.float64)
     n = float(np.linalg.norm(to_center))
-    if n < 1e-8:
-        yaw = 0.0
-        normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    else:
-        normal = to_center / n
-        yaw = float(np.arctan2(normal[0], normal[2]))
-
-    rotation = {
-        "yaw": yaw,
-        "matrix": rotation_matrix_yaw(yaw).tolist(),
-        "wall_normal": normal.tolist(),
-        "source": "default",
-    }
-    if range_method is not None:
-        rotation["range_method"] = range_method
-    return rotation
+    normal = to_center / n if n >= 1e-8 else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    return _yaw_rotation_dict(
+        yaw_from_wall_normal(normal),
+        normal,
+        source="default",
+        range_method=range_method,
+    )
 
 
 def resolve_standing_rotation(
@@ -276,6 +269,21 @@ def resolve_standing_rotation(
     return yaw, rotation_matrix_yaw(yaw), normal
 
 
+def _pose_preflight(data: dict) -> str | None:
+    """Typical scene-level causes that make every mask fail translation."""
+    if not isinstance(data, dict):
+        return "missing_layout"
+    if data.get("cameraHeight") is None:
+        return "missing_camera_height"
+    points = data.get("layoutPoints")
+    walls = data.get("layoutWalls")
+    n_pts = (points or {}).get("points") if isinstance(points, dict) else None
+    n_walls = (walls or {}).get("walls") if isinstance(walls, dict) else None
+    if not n_pts or not n_walls:
+        return "missing_layout"
+    return None
+
+
 def freestanding_floor_translation(
     origin: np.ndarray,
     direction: np.ndarray,
@@ -287,34 +295,30 @@ def freestanding_floor_translation(
     min_reliable_floor_range: float = 0.4,
     nadir_dy: float = 0.92,
     wall_margin: float = 0.08,
-) -> tuple[np.ndarray | None, str | None]:
+) -> tuple[np.ndarray | None, str | None, str | None]:
     """
     Place a freestanding object on the floor using metric range along azimuth.
-
-    Avoids the nadir singularity of pure ray–floor intersection:
 
       1) If the classical floor hit is far enough from the camera, keep it
          (clamped inside the wall distance).
       2) Else if ``object_height`` is known, use angular-size → range.
-      3) Else use a fraction of the layout wall distance along this azimuth,
-         with the fraction from ray elevation (near nadir → closer).
+      3) Else use a fraction of the layout wall distance along this azimuth.
 
-    Returns ``(translation, method)`` with method in
-    ``{'floor', 'angular', 'wall_fraction'}`` or ``(None, None)``.
+    Returns ``(translation, method, error)``. ``error`` is None on success.
     """
     if depth is None:
-        return None, None
+        return None, None, "no_depth"
 
     origin = np.asarray(origin, dtype=np.float64).reshape(3)
     direction = np.asarray(direction, dtype=np.float64).reshape(3)
     camera_height = float(data["cameraHeight"])
     r_wall = wall_distance_from_depth(depth, uv, camera_height)
     if r_wall <= 1e-3:
-        return None, None
+        return None, None, "depth_wall_range_zero"
 
     az = azimuth_unit_xz(direction, uv)
     if az is None:
-        return None, None
+        return None, None, "no_azimuth"
 
     r_max = max(r_wall - wall_margin, min_reliable_floor_range * 0.5)
     dy = abs(float(direction[1]))
@@ -322,15 +326,10 @@ def freestanding_floor_translation(
     r_floor = None
     try:
         p_floor = ray_intersect_floor(origin, direction, data)
-        if check_floor_hit(p_floor, data) and closer_than_wall(
-            p_floor, uv, depth, data
-        ):
+        if check_floor_hit(p_floor, data) and closer_than_wall(p_floor, uv, depth, data):
             r_floor = horizontal_range(p_floor)
     except ValueError:
-        p_floor = None
-
-    method = None
-    range_m = None
+        pass
 
     if (
         r_floor is not None
@@ -355,8 +354,59 @@ def freestanding_floor_translation(
 
     p = shrink_range_into_footprint(origin, az, range_m, data)
     if p is None:
-        return None, None
-    return p, method
+        return None, None, "outside_footprint"
+    return p, method, None
+
+
+def _try_translation(
+    origin: np.ndarray,
+    direction: np.ndarray,
+    uv: np.ndarray,
+    binary: np.ndarray,
+    data: dict,
+    depth: np.ndarray | None,
+    object_height: float | None,
+) -> tuple[np.ndarray | None, str | None, str | None, dict | None, str | None]:
+    """
+    Chronological translation attempts for one contact UV:
+
+      1) depth-based floor range (if depth is present)
+      2) legacy floor-plane ray
+      3) nearest layout wall ray
+
+    Returns ``(translation, surface, range_method, hit_wall, error)``.
+    """
+    fails: list[str] = []
+
+    if depth is not None:
+        t, method, reason = freestanding_floor_translation(
+            origin, direction, uv, binary, data, depth, object_height=object_height
+        )
+        if t is not None:
+            return t, "floor", method, None, None
+        fails.append(reason)
+
+    try:
+        p_floor = ray_intersect_floor(origin, direction, data)
+    except (ValueError, KeyError):
+        p_floor = None
+        fails.append("floor_ray_miss")
+    else:
+        if p_floor is not None and check_floor_hit(p_floor, data):
+            return p_floor, "floor", "floor", None, None
+        fails.append("outside_footprint" if p_floor is not None else "floor_ray_miss")
+
+    try:
+        p_wall, hit_wall = ray_intersect_wall(
+            origin, direction, data, return_wall=True
+        )
+    except (KeyError, TypeError, ValueError):
+        p_wall, hit_wall = None, None
+    if p_wall is not None:
+        return p_wall, "wall", None, hit_wall, None
+    fails.append("no_wall_hit")
+    return None, None, None, None, "; ".join(dict.fromkeys(fails))
+
 
 def resolve_mesh_scale(
     binary: np.ndarray,
@@ -367,27 +417,25 @@ def resolve_mesh_scale(
     min_scale: float = 0.2,
     max_scale: float = 3.0,
 ) -> dict | None:
-    """
-    Choose a uniform mesh scale for a placed object.
+    """Choose a uniform mesh scale, or None when scale cannot be derived."""
+    scale, _reason = _mesh_scale_or_reason(
+        binary, translation, surface, range_method, object_height, min_scale, max_scale
+    )
+    return scale
 
-    Priority (freestanding / floor):
-      1) Room distance (``floor`` / ``wall_fraction``): size the mesh so its
-         height matches the mask angular height at the placed range.
-      2) Angular ranging (case 2): distance was already derived from the SAM3D
-         mesh height, so keep factor 1.0 (self-consistent — not an arbitrary
-         fallback).
-      3) Unresolved → ``None`` (caller must skip). Never invent a bare
-         ``factor=1.0`` / ``method=sam3d`` for floor objects when scale cannot
-         be derived; a wrong size looks more broken than a missing object.
 
-    Wall-mounted: native SAM3D mesh scale (factor 1.0) is intentional — there
-    is no room-distance scale path for walls.
-
-    Returns a JSON-serializable dict with at least ``factor`` and ``method``,
-    or ``None`` when scale is unresolved / non-finite / out of bounds.
-    """
+def _mesh_scale_or_reason(
+    binary: np.ndarray,
+    translation: np.ndarray,
+    surface: str | None,
+    range_method: str | None,
+    object_height: float | None = None,
+    min_scale: float = 0.2,
+    max_scale: float = 3.0,
+) -> tuple[dict | None, str | None]:
+    """Same as ``resolve_mesh_scale``, plus a failure token when scale is None."""
     if translation is None:
-        return None
+        return None, "missing_translation"
 
     base = {
         "object_height": float(object_height) if object_height is not None else None,
@@ -397,48 +445,36 @@ def resolve_mesh_scale(
         "range_method": range_method,
     }
 
-    # Wall-mounted: keep authored mesh size.
     if surface == "wall":
-        return {
-            **base,
-            "factor": 1.0,
-            "method": "sam3d",
-        }
-
+        return {**base, "factor": 1.0, "method": "sam3d"}, None
     if surface != "floor":
-        return None
+        return None, "unknown_surface"
+
+    if object_height is None or object_height <= 1e-3:
+        return None, "missing_object_height"
 
     range_m = horizontal_range(translation)
     alpha = mask_angular_height(binary)
     base["range_m"] = float(range_m)
     base["angular_height"] = float(alpha)
 
-    # Primary: room-based range → solve for height / scale.
-    if (
-        range_method in ("floor", "wall_fraction")
-        and object_height is not None
-        and object_height > 1e-3
-        and alpha > 1e-3
-        and range_m > 1e-3
-    ):
+    if range_method in ("floor", "wall_fraction"):
+        if alpha <= 1e-3:
+            return None, "missing_angular_height"
+        if range_m <= 1e-3:
+            return None, "range_too_small"
         h_target = height_from_angular_size(alpha, range_m)
         factor = float(h_target / object_height)
         if not np.isfinite(factor) or factor <= 0.0:
-            return None
-        factor = float(np.clip(factor, min_scale, max_scale))
+            return None, "non_finite_factor"
         return {
             **base,
-            "factor": factor,
+            "factor": float(np.clip(factor, min_scale, max_scale)),
             "method": "room_distance",
             "target_height": float(h_target),
-        }
+        }, None
 
-    # Angular ranging already used object_height for R — factor 1.0 is correct.
-    if (
-        range_method == "angular"
-        and object_height is not None
-        and object_height > 1e-3
-    ):
+    if range_method == "angular":
         scale = {
             **base,
             "factor": 1.0,
@@ -449,10 +485,9 @@ def resolve_mesh_scale(
             scale["angular_range_m"] = float(
                 range_from_angular_size(alpha, object_height)
             )
-        return scale
+        return scale, None
 
-    # No resolved scale — skip rather than guess.
-    return None
+    return None, "no_scale_path"
 
 
 def resolve_standing_pose(
@@ -468,31 +503,30 @@ def resolve_standing_pose(
     str | None,
     dict | None,
     dict | None,
+    str | None,
 ]:
     """
     Resolve translation, yaw rotation, and mesh scale for one mask.
 
-    Freestanding objects use metric range along the contact azimuth (fraction
-    of wall distance and/or angular-size range) instead of a raw nadir-sensitive
-    floor-plane hit. Wall-mounted objects still use layout wall raycasts.
+    Chronological per contact UV:
+      1) depth floor range (if depth) → 2) floor-plane ray → 3) wall ray
+      4) yaw rotation (default upright if the wall heuristic fails)
+      5) mesh scale (floor needs SAM3D height; wall uses native scale)
 
-    Per-component failure policy:
-      - translation missing → try next contact UV; all fail → all-None tuple
-      - scale unresolved → try next UV; never return a placement with a
-        guessed scale (caller skips when scale is None)
-      - rotation missing → use ``default_standing_rotation`` (still success)
-
-    Rotation convention: mesh local +Z faces flush into the room along the
-    inward normal of the nearest (or hit) wall — back against the wall.
+    Translation or scale failure skips the object (never a guessed origin/size).
+    Rotation failure does not skip.
 
     Returns
-      (translation, contact_uv, surface, rotation, scale)
-    where rotation is
-      {'yaw': float, 'matrix': 3x3 list, 'wall_normal': [nx, ny, nz], ...}
-    and scale is
-      {'factor': float, 'method': 'room_distance'|'angular'|'sam3d', ...}
-    or (None, None, None, None, None) when translation/scale cannot be resolved.
+      (translation, contact_uv, surface, rotation, scale, error)
+    with ``error`` None on success, else ``unresolved: translation: …`` and/or
+    ``unresolved: scale: …``. Pose fields are all None when error is set.
     """
+    preflight = _pose_preflight(data)
+    if preflight:
+        return None, None, None, None, None, _unresolved_error(
+            translation_detail=preflight
+        )
+
     if origin is None:
         origin = np.zeros(3, dtype=np.float64)
     else:
@@ -501,72 +535,45 @@ def resolve_standing_pose(
     if depth is not None:
         depth = np.asarray(depth, dtype=np.float64).reshape(-1)
 
-    for uv in contact_uvs_from_mask(binary, num_samples=num_samples):
-        direction = uv2equirectangular(uv)
-        translation = None
-        surface = None
-        hit_wall = None
-        range_method = None
+    uvs = contact_uvs_from_mask(binary, num_samples=num_samples)
+    if not uvs:
+        return None, None, None, None, None, _unresolved_error(
+            translation_detail="no_contact_uvs"
+        )
 
-        if depth is not None:
-            translation, range_method = freestanding_floor_translation(
-                origin,
-                direction,
-                uv,
-                binary,
-                data,
-                depth,
-                object_height=object_height,
-            )
-            if translation is not None:
-                surface = "floor"
+    translation_detail = None
+    scale_detail = None
+    saw_translation = False
 
+    for uv in uvs:
+        translation, surface, range_method, hit_wall, t_fail = _try_translation(
+            origin, direction=uv2equirectangular(uv), uv=uv, binary=binary,
+            data=data, depth=depth, object_height=object_height,
+        )
         if translation is None:
-            # Legacy floor hit when depth is unavailable.
-            try:
-                p_floor = ray_intersect_floor(origin, direction, data)
-            except ValueError:
-                p_floor = None
-            if p_floor is not None and check_floor_hit(p_floor, data):
-                translation, surface, range_method = p_floor, "floor", "floor"
-
-        if translation is None:
-            p_wall, hit_wall = ray_intersect_wall(
-                origin, direction, data, return_wall=True
-            )
-            if p_wall is not None:
-                translation, surface = p_wall, "wall"
-
-        if translation is None:
+            translation_detail = t_fail
             continue
 
+        saw_translation = True
         yaw, matrix, normal = resolve_standing_rotation(
             translation, data, wall=hit_wall
         )
         if yaw is not None and matrix is not None and normal is not None:
-            rotation = {
-                "yaw": float(yaw),
-                "matrix": matrix.tolist(),
-                "wall_normal": normal.tolist(),
-            }
-            if range_method is not None:
-                rotation["range_method"] = range_method
+            rotation = _yaw_rotation_dict(yaw, normal, range_method=range_method)
         else:
-            # Valid pose + size with a slightly wrong yaw beats skipping.
             rotation = default_standing_rotation(translation, range_method)
 
-        scale = resolve_mesh_scale(
-            binary,
-            translation,
-            surface,
-            range_method,
-            object_height=object_height,
+        scale, s_fail = _mesh_scale_or_reason(
+            binary, translation, surface, range_method, object_height=object_height
         )
         if scale is None:
-            # Scale unresolved for this UV — try another contact; do not emit
-            # an arbitrary factor=1.0 that can look comically wrong.
+            scale_detail = s_fail
             continue
 
-        return translation, uv, surface, rotation, scale
+        return translation, uv, surface, rotation, scale, None
 
-    return None, None, None, None, None
+    if saw_translation:
+        error = _unresolved_error(scale_detail=scale_detail or "unknown")
+    else:
+        error = _unresolved_error(translation_detail=translation_detail or "no_in_room_hit")
+    return None, None, None, None, None, error

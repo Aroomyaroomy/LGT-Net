@@ -7,14 +7,12 @@ from utils.conversion import pixel2uv, uv2lonlat, lonlat2xyz
 def to_json_frame(xyz: np.ndarray) -> np.ndarray:
     """
     Map an internal LGT xyz vector into the xyz2json / layoutPoints frame.
-    Matches utils.writer.xyz2json: 180 deg yaw then flip X. Y is unchanged, so
-    the floor remains y = cameraHeight.
+
+    Equivalent to utils.writer.xyz2json (180° yaw then flip X): ``(x, y, -z)``.
+    Y is unchanged, so the floor remains y = cameraHeight.
     """
     xyz = np.asarray(xyz, dtype=np.float64).reshape(3)
-    r_180 = cv2.Rodrigues(np.array([0, -np.pi, 0], np.float32))[0]
-    out = np.dot(r_180, xyz)
-    out[0] *= -1
-    return out
+    return np.array([xyz[0], xyz[1], -xyz[2]], dtype=np.float64)
 
 
 # Linear map from xyz2json / layoutPoints coordinates into visualization.obj3d
@@ -89,19 +87,8 @@ def uv2equirectangular(uv: np.ndarray) -> np.ndarray:
 
 
 def solve_t(y: float, origin: np.ndarray, direction: np.ndarray) -> float:
-    """
-    Solve origin + t * direction for intersection with the horizontal plane at height y.
-    Rejects rays parallel to the plane or with non-positive t (wrong direction).
-    """
-    origin = np.asarray(origin, dtype=np.float64).reshape(3)
-    direction = np.asarray(direction, dtype=np.float64).reshape(3)
-    dy = direction[1]
-    if abs(dy) < 1e-12:
-        raise ValueError("Ray is parallel to the floor plane")
-    t = (y - origin[1]) / dy
-    if t <= 0:
-        raise ValueError(f"Ray does not hit the floor in the forward direction (t={t})")
-    return float(t)
+    """Intersect a ray with the horizontal plane at height y (JSON +Y)."""
+    return solve_t_plane(origin, direction, np.array([0.0, 1.0, 0.0, -float(y)]))
 
 
 def solve_t_plane(
@@ -129,19 +116,10 @@ def solve_t_plane(
 
 
 def ray_intersect_floor(origin: np.ndarray, direction: np.ndarray, data: dict) -> np.ndarray:
-    """
-    Intersect a ray with the floor plane in xyz2json coordinates.
-
-    Floor plane: y = data['cameraHeight'] (default 1.6m).
-    origin and direction must already be in that JSON layout frame
-    (use uv2equirectangular for mask contact UVs).
-
-    Returns a candidate translation point where we think the object is located.
-    """
-    camera_height = float(data['cameraHeight'])
+    """Intersect a ray with the floor plane y = cameraHeight in xyz2json coordinates."""
     origin = np.asarray(origin, dtype=np.float64).reshape(3)
     direction = np.asarray(direction, dtype=np.float64).reshape(3)
-    t = solve_t(camera_height, origin, direction)
+    t = solve_t(float(data["cameraHeight"]), origin, direction)
     return origin + t * direction
 
 
@@ -167,11 +145,11 @@ def _point_on_segment_xz(
     return float(np.linalg.norm(p - (a_xz + t * ab))) <= tol
 
 
-def _wall_y_bounds(data: dict) -> tuple[float, float]:
-    """Valid wall height range in JSON frame (ceiling negative-y, floor +cameraHeight)."""
-    camera_height = float(data['cameraHeight'])
-    ceiling = float(data.get('cameraCeilingHeight', data['layoutHeight'] - camera_height))
-    return -ceiling, camera_height
+def layout_y_bounds(data: dict) -> tuple[float, float]:
+    """Return ``(floor_y, ceiling_y)`` in the JSON frame (+Y toward the floor)."""
+    floor_y = float(data["cameraHeight"])
+    ceiling = float(data.get("cameraCeilingHeight", data.get("layoutHeight", 2.6) - floor_y))
+    return floor_y, -float(ceiling)
 
 
 def ray_intersect_wall(
@@ -192,7 +170,7 @@ def ray_intersect_wall(
     direction = np.asarray(direction, dtype=np.float64).reshape(3)
     points = data['layoutPoints']['points']
     walls = data['layoutWalls']['walls']
-    y_lo, y_hi = _wall_y_bounds(data)
+    floor_y, ceiling_y = layout_y_bounds(data)
 
     best_t = None
     best_hit = None
@@ -203,7 +181,7 @@ def ray_intersect_wall(
         except ValueError:
             continue
         hit = origin + t * direction
-        if hit[1] < y_lo - segment_tol or hit[1] > y_hi + segment_tol:
+        if hit[1] < ceiling_y - segment_tol or hit[1] > floor_y + segment_tol:
             continue
         i0, i1 = wall['pointsIdx']
         a = points[i0]['xyz']
@@ -282,16 +260,11 @@ def point_in_floor_polygon(p_xz: np.ndarray, polygon: np.ndarray) -> bool:
     polygon: (N, 2) footprint from floor_polygon_from_layout.
     """
     p = np.asarray(p_xz, dtype=np.float64).reshape(-1)
-    if p.shape[0] == 3:
+    if p.size >= 3:
         p = p[[0, 2]]
-    elif p.shape[0] != 2:
-        raise ValueError(f"p_xz must have shape (2,) or (3,), got {p.shape}")
-
     poly = np.asarray(polygon, dtype=np.float64).reshape(-1, 2)
     if len(poly) < 3:
         raise ValueError("floor polygon needs at least 3 vertices")
-
-    # cv2.pointPolygonTest: +1 inside, 0 on edge, -1 outside
     return cv2.pointPolygonTest(poly.astype(np.float32), (float(p[0]), float(p[1])), False) >= 0
 
 
@@ -312,9 +285,6 @@ def contact_uvs_from_mask(binary: np.ndarray, num_samples: int = 5) -> list[np.n
     Samples span the mask width at the centroid row; center first, then outward.
     """
     binary = np.asarray(binary)
-    if binary.ndim != 2:
-        raise ValueError("binary mask must be 2D")
-
     ys, xs = np.where(binary)
     if len(xs) == 0:
         return []
@@ -341,10 +311,6 @@ def contact_uvs_from_mask(binary: np.ndarray, num_samples: int = 5) -> list[np.n
         pixel2uv(np.array([u, v_centroid], dtype=np.float64), w=w, h=h)
         for u in us
     ]
-
-
-# Back-compat alias
-bottom_contact_uvs_from_mask = contact_uvs_from_mask
 
 
 def horizontal_wall_normal(normal: np.ndarray) -> np.ndarray:

@@ -101,7 +101,8 @@ class CrashSafetyTests(unittest.TestCase):
         data = _square_room()
         empty = np.zeros((64, 128), dtype=bool)
         out = resolve_standing_pose(empty, data, depth=np.ones(256))
-        self.assertEqual(out, (None, None, None, None, None))
+        self.assertEqual(out[:5], (None, None, None, None, None))
+        self.assertIn("translation: no_contact_uvs", out[5])
 
     def test_failed_poses_never_reach_renderer_payload(self):
         """
@@ -116,7 +117,7 @@ class CrashSafetyTests(unittest.TestCase):
 
             with patch(
                 "reposition.reposition.resolve_standing_pose",
-                return_value=(None, None, None, None, None),
+                return_value=(None, None, None, None, None, "unresolved: translation: no_contact_uvs"),
             ):
                 placements, success, failure = placements_from_mask_dir(
                     mask_dir,
@@ -149,11 +150,11 @@ class CoreLogicTests(unittest.TestCase):
             freestanding_floor_translation(
                 origin, direction, uv, binary, data, depth=None
             ),
-            (None, None),
+            (None, None, "no_depth"),
         )
 
         depth = np.full(256, 2.0 / data["cameraHeight"], dtype=np.float64)
-        p, method = freestanding_floor_translation(
+        p, method, err = freestanding_floor_translation(
             origin,
             direction,
             uv,
@@ -163,6 +164,7 @@ class CoreLogicTests(unittest.TestCase):
             object_height=0.9,
         )
         self.assertIsNotNone(p)
+        self.assertIsNone(err)
         self.assertIn(method, {"floor", "angular", "wall_fraction"})
         self.assertAlmostEqual(float(p[1]), data["cameraHeight"], places=5)
         self.assertLess(float(np.linalg.norm(p[[0, 2]])), 2.0)
@@ -210,7 +212,7 @@ class CoreLogicTests(unittest.TestCase):
             "reposition.reposition.resolve_standing_rotation",
             return_value=(None, None, None),
         ):
-            t, uv, surface, rotation, scale = resolve_standing_pose(
+            t, uv, surface, rotation, scale, err = resolve_standing_pose(
                 binary,
                 data,
                 depth=depth,
@@ -219,6 +221,7 @@ class CoreLogicTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(t)
+        self.assertIsNone(err)
         self.assertEqual(surface, "floor")
         self.assertIsNotNone(scale)
         self.assertEqual(rotation["source"], "default")
@@ -229,7 +232,7 @@ class CoreLogicTests(unittest.TestCase):
         binary = _blob_mask()
         depth = np.full(256, 2.0 / data["cameraHeight"], dtype=np.float64)
 
-        translation, contact_uv, surface, rotation, scale = resolve_standing_pose(
+        translation, contact_uv, surface, rotation, scale, err = resolve_standing_pose(
             binary,
             data,
             depth=depth,
@@ -237,6 +240,7 @@ class CoreLogicTests(unittest.TestCase):
             num_samples=3,
         )
         self.assertIsNotNone(translation)
+        self.assertIsNone(err)
         self.assertIsNotNone(contact_uv)
         self.assertEqual(surface, "floor")
         self.assertIsInstance(rotation, dict)
@@ -267,6 +271,7 @@ class CoreLogicTests(unittest.TestCase):
                     "floor",
                     default_standing_rotation(fake_t),
                     None,  # scale unresolved
+                    "unresolved: scale: missing_object_height",
                 ),
             ):
                 placements, success, failure = placements_from_mask_dir(
@@ -280,6 +285,26 @@ class CoreLogicTests(unittest.TestCase):
         self.assertEqual(failure, 1)
         self.assertFalse(any(_is_renderable(p) for p in placements))
         self.assertIn("scale", placements[0]["error"])
+
+
+    def test_failure_causes_are_specific(self):
+        data = _square_room()
+        binary = _blob_mask()
+        depth = np.full(256, 2.0 / data["cameraHeight"], dtype=np.float64)
+
+        t, *_, err = resolve_standing_pose(binary, data, depth=depth)
+        self.assertIsNone(t)
+        self.assertIn("scale: missing_object_height", err)
+
+        t, *_, err = resolve_standing_pose(binary, {}, depth=depth)
+        self.assertIsNone(t)
+        self.assertIn("translation: missing_camera_height", err)
+
+        t, *_, err = resolve_standing_pose(
+            binary, {"cameraHeight": 1.6}, depth=depth
+        )
+        self.assertIsNone(t)
+        self.assertIn("translation: missing_layout", err)
 
 
 class UprightnessEvalTests(unittest.TestCase):
