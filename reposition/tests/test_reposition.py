@@ -188,7 +188,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
         self.assertIn(method, ["angular", "wall_fraction", "floor"])
 
     def test_wall_fraction_fallback(self):
-        """Without object_height, near-nadir rays fall back to wall_fraction."""
+        """Without SAM3D height, near-nadir rays still range (assumed height)."""
         origin = np.zeros(3)
         direction = np.array([0.0, 0.98, -0.2])
         direction = direction / np.linalg.norm(direction)
@@ -199,7 +199,7 @@ class TestFreestandingFloorTranslation(unittest.TestCase):
             origin, direction, uv, binary, self.room, self.depth,
             object_height=None)
         self.assertIsNotNone(p)
-        self.assertEqual(method, "wall_fraction")
+        self.assertIn(method, ["angular", "wall_fraction"])
         self.assertAlmostEqual(p[1], 1.6)
 
     def test_returns_none_without_depth(self):
@@ -357,6 +357,20 @@ class TestResolveStandingPose(unittest.TestCase):
             binary, self.room, depth=self.depth, object_height=1.5)
         self.assertIsNotNone(t)
         self.assertIsNotNone(rotation)
+
+    def test_without_sam3d_height_still_places(self):
+        """Missing SAM3D object height must not skip a otherwise-valid pose."""
+        binary = _centered_mask()
+        t, uv, surface, rotation, scale, err = resolve_standing_pose(
+            binary, self.room, depth=self.depth)
+        self.assertIsNone(err)
+        self.assertIsNotNone(t)
+        self.assertIsNotNone(uv)
+        self.assertIsNotNone(rotation)
+        self.assertIsNotNone(scale)
+        self.assertIn(scale["method"], {"room_distance", "angular", "assumed"})
+        self.assertGreater(scale["factor"], 0.0)
+        self.assertAlmostEqual(scale["assumed_height"], 0.8)
 
     def test_no_depth_fallback(self):
         """Without depth, resolves pose via legacy floor/wall path."""
@@ -535,7 +549,7 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
         self.tmp = Path(self.tmpdir.name)
         self.room = _make_room_data()
         self.depth = _dummy_depth()
-        # Heights so room_distance / angular scale can resolve (no bare scale=1).
+        # Optional SAM3D heights; placement must also work without them.
         self.sam3d_meta = {
             i: {"scale": 1.0, "rotation_xyzw": [0, 0, 0, 1]}
             for i in range(8)
@@ -626,6 +640,17 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
             sam3d_metadata=self.sam3d_meta)
         self.assertEqual(len(results), 1)
         self.assertIsNotNone(results[0]["translation"])
+
+    def test_without_sam3d_metadata_still_places(self):
+        self._create_mask("mask_0.png", u_center=512, v_center=280)
+        results, success, failure = placements_from_mask_dir(
+            self.tmp, self.room, depth=self.depth, do_manhattan=False)
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0].get("error"))
+        self.assertIsNotNone(results[0]["translation"])
+        self.assertIsNotNone(results[0]["scale"])
+        self.assertEqual(success, 1)
+        self.assertEqual(failure, 0)
 
     def test_all_masks_have_surface_field(self):
         for i in range(3):

@@ -178,24 +178,27 @@ class CoreLogicTests(unittest.TestCase):
         )
         self.assertEqual(room["method"], "room_distance")
         self.assertGreater(room["factor"], 0.0)
+        self.assertIsNotNone(room["target_height"])
 
         angular = resolve_mesh_scale(
             binary, translation, "floor", "angular", object_height=1.0
         )
         self.assertEqual(angular["method"], "angular")
-        self.assertEqual(angular["factor"], 1.0)
+        self.assertGreater(angular["factor"], 0.0)
 
-        # Wall: native SAM3D size is intentional.
         wall = resolve_mesh_scale(
             binary, translation, "wall", None, object_height=1.0
         )
-        self.assertEqual(wall["method"], "sam3d")
-        self.assertEqual(wall["factor"], 1.0)
+        self.assertEqual(wall["method"], "room_distance")
+        self.assertGreater(wall["factor"], 0.0)
 
-        # Floor without a derivable scale must not invent factor=1.0.
-        self.assertIsNone(
-            resolve_mesh_scale(binary, translation, "floor", "wall_fraction")
-        )
+        # Missing SAM3D height still yields a scale from the assumed prior.
+        assumed = resolve_mesh_scale(binary, translation, "floor", "wall_fraction")
+        self.assertIsNotNone(assumed)
+        self.assertEqual(assumed["method"], "room_distance")
+        self.assertGreater(assumed["factor"], 0.0)
+        self.assertAlmostEqual(assumed["assumed_height"], 0.8)
+        self.assertIsNone(assumed["object_height"])
 
     def test_rotation_fallback_does_not_skip(self):
         """Rotation failure alone → default upright orientation, still placed."""
@@ -292,9 +295,13 @@ class CoreLogicTests(unittest.TestCase):
         binary = _blob_mask()
         depth = np.full(256, 2.0 / data["cameraHeight"], dtype=np.float64)
 
-        t, *_, err = resolve_standing_pose(binary, data, depth=depth)
-        self.assertIsNone(t)
-        self.assertIn("scale: missing_object_height", err)
+        t, *rest, err = resolve_standing_pose(binary, data, depth=depth)
+        self.assertIsNotNone(t)
+        self.assertIsNone(err)
+        scale = rest[-1]
+        self.assertIsNotNone(scale)
+        self.assertIn(scale["method"], {"room_distance", "angular", "assumed"})
+        self.assertAlmostEqual(scale["assumed_height"], 0.8)
 
         t, *_, err = resolve_standing_pose(binary, {}, depth=depth)
         self.assertIsNone(t)

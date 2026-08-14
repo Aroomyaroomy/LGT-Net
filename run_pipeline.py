@@ -831,10 +831,10 @@ def visualize_placed_furniture(
       3) else wall-heuristic rotation from LGT (xyz2json → obj3d remap)
 
     Translation always comes from LGT and is remapped xyz2json → obj3d.
-    Uniform ``placement.scale.factor`` is applied when present. If the LGT
-    service lacked mesh heights (scale method still ``sam3d``) but stored
-    room-distance angular metadata, the factor is recomputed from the local
-    GLB AABB height before posing.
+    Uniform ``placement.scale.factor`` is applied when present. When a local
+    GLB is available, the factor is recomputed from the mesh AABB height and
+    stored ``target_height`` (or α / R) so pose-time assumed heights are not
+    double-applied.
     When ``snap_to_floor`` is True (default), freestanding meshes are raised /
     lowered after posing so their AABB bottom sits on the placement floor
     plane (SAM3D pivots are usually mesh-centered).
@@ -941,42 +941,36 @@ def visualize_placed_furniture(
         scale_factor = float(scale_info.get("factor", 1.0) or 1.0)
         scale_method = scale_info.get("method") or "sam3d"
 
-        # LGT Docker often lacks furniture meshes, so scale stays sam3d=1.0.
-        # Recompute room-distance scale here from local GLB + stored α / R.
-        if (
-            placement.get("surface") != "wall"
-            and scale_method == "sam3d"
-            and abs(scale_factor - 1.0) < 1e-6
-        ):
-            range_method = (
-                scale_info.get("range_method")
-                or (rotation.get("range_method") if isinstance(rotation, dict) else None)
-            )
-            alpha = scale_info.get("angular_height")
-            range_m = scale_info.get("range_m")
-            if (
-                range_method in ("floor", "wall_fraction")
-                and alpha is not None
-                and range_m is not None
-                and float(alpha) > 1e-3
-                and float(range_m) > 1e-3
-            ):
-                try:
-                    extents = mesh.get_axis_aligned_bounding_box().get_extent()
-                    h_mesh = float(extents[1])
-                    if h_mesh > 1e-4:
-                        h_target = height_from_angular_size(float(alpha), float(range_m))
-                        scale_factor = float(np.clip(h_target / h_mesh, 0.2, 3.0))
-                        scale_method = "room_distance"
-                        scale_info = {
-                            **scale_info,
-                            "factor": scale_factor,
-                            "method": scale_method,
-                            "object_height": h_mesh,
-                            "target_height": float(h_target),
-                        }
-                except Exception:
-                    pass
+        # Pose-time scale may use an assumed native height when SAM3D is
+        # missing. Recompute from the local GLB AABB + stored H_target / α, R
+        # so the mesh matches the mask without double-applying that prior.
+        alpha = scale_info.get("angular_height")
+        range_m = scale_info.get("range_m")
+        h_target = scale_info.get("target_height")
+        try:
+            extents = mesh.get_axis_aligned_bounding_box().get_extent()
+            h_mesh = float(extents[1])
+            if h_mesh > 1e-4:
+                if (
+                    h_target is None
+                    and alpha is not None
+                    and range_m is not None
+                    and float(alpha) > 1e-3
+                    and float(range_m) > 1e-3
+                ):
+                    h_target = height_from_angular_size(float(alpha), float(range_m))
+                if h_target is not None and float(h_target) > 1e-4:
+                    scale_factor = float(np.clip(float(h_target) / h_mesh, 0.2, 3.0))
+                    scale_method = "room_distance"
+                    scale_info = {
+                        **scale_info,
+                        "factor": scale_factor,
+                        "method": scale_method,
+                        "object_height": h_mesh,
+                        "target_height": float(h_target),
+                    }
+        except Exception:
+            pass
 
         # Translations are always xyz2json → obj3d. SAM3D rotations are already
         # authored in the obj3d / Open3D Y-up frame; wall heuristics are not.

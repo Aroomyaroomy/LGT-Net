@@ -32,9 +32,13 @@ from .sam_utils import (
     object_height_from_sam3d,
 )
 from .quality_control import (
+    DEFAULT_OBJECT_HEIGHT_M,
     apply_placement_quality,
     mark_quality_rejections,
 )
+
+# Class-agnostic prior used when SAM3D mesh height is unavailable.
+ASSUMED_OBJECT_HEIGHT_M = float(DEFAULT_OBJECT_HEIGHT_M)
 
 
 def get_masks(mask_dir: Path) -> list[Path]:
@@ -91,16 +95,18 @@ def placements_from_mask_dir(
     return JSON-serializable placement records (translation, yaw rotation,
     and mesh scale).
 
-    Optional SAM3D ``metadata`` / ``furniture_dir`` supply per-object heights
-    for angular-size freestanding ranging and room-distance mesh scaling.
+    Optional SAM3D ``metadata`` / ``furniture_dir`` refine per-object height
+    when present; they are never required. Translation uses room geometry
+    (and an assumed height only for angular ranging). Scale matches the
+    mask at that range against SAM3D height or ``ASSUMED_OBJECT_HEIGHT_M``.
     Optional ``dino_boxes`` enables Plan A label/surface quality checks.
 
     Graceful failure policy (per component):
       - translation unresolved → skip object (never place at origin);
         ``error`` names the cause (``missing_layout``, ``no_contact_uvs``,
         ``outside_footprint``, ``no_wall_hit``, …)
-      - scale unresolved → skip object (never invent a bare scale=1.0);
-        ``error`` names the cause (``missing_object_height``, …)
+      - scale unresolved → skip object (degenerate α / range only; missing
+        SAM3D height is not a scale failure)
       - rotation unresolved → keep object; default upright orientation is
         already applied inside ``resolve_standing_pose``
       - quality-control reject → skip object; reason written to ``error``
@@ -269,6 +275,13 @@ def resolve_standing_rotation(
     return yaw, rotation_matrix_yaw(yaw), normal
 
 
+def _reference_height(object_height: float | None) -> tuple[float, bool]:
+    """Metric height used for ranging/scale. ``assumed`` is True without SAM3D."""
+    if object_height is not None and float(object_height) > 1e-3:
+        return float(object_height), False
+    return float(ASSUMED_OBJECT_HEIGHT_M), True
+
+
 def _pose_preflight(data: dict) -> str | None:
     """Typical scene-level causes that make every mask fail translation."""
     if not isinstance(data, dict):
@@ -301,8 +314,9 @@ def freestanding_floor_translation(
 
       1) If the classical floor hit is far enough from the camera, keep it
          (clamped inside the wall distance).
-      2) Else if ``object_height`` is known, use angular-size → range.
-      3) Else use a fraction of the layout wall distance along this azimuth.
+      2) Else angular-size → range from SAM3D height or
+         ``ASSUMED_OBJECT_HEIGHT_M`` (never requires SAM3D).
+      3) Else a fraction of the layout wall distance along this azimuth.
 
     Returns ``(translation, method, error)``. ``error`` is None on success.
     """
@@ -340,10 +354,10 @@ def freestanding_floor_translation(
         method = "floor"
     else:
         r_angular = None
-        if object_height is not None and object_height > 1e-3:
-            alpha = mask_angular_height(binary)
-            if alpha > 1e-3:
-                r_angular = range_from_angular_size(alpha, object_height)
+        h_ref, _ = _reference_height(object_height)
+        alpha = mask_angular_height(binary)
+        if alpha > 1e-3:
+            r_angular = range_from_angular_size(alpha, h_ref)
         if r_angular is not None and np.isfinite(r_angular):
             range_m = float(np.clip(r_angular, min_reliable_floor_range * 0.5, r_max))
             method = "angular"
@@ -417,7 +431,7 @@ def resolve_mesh_scale(
     min_scale: float = 0.2,
     max_scale: float = 3.0,
 ) -> dict | None:
-    """Choose a uniform mesh scale, or None when scale cannot be derived."""
+    """Uniform mesh scale so projected height matches the mask at this range."""
     scale, _reason = _mesh_scale_or_reason(
         binary, translation, surface, range_method, object_height, min_scale, max_scale
     )
@@ -427,67 +441,57 @@ def resolve_mesh_scale(
 def _mesh_scale_or_reason(
     binary: np.ndarray,
     translation: np.ndarray,
-    surface: str | None,
+    _surface: str | None,
     range_method: str | None,
     object_height: float | None = None,
     min_scale: float = 0.2,
     max_scale: float = 3.0,
 ) -> tuple[dict | None, str | None]:
-    """Same as ``resolve_mesh_scale``, plus a failure token when scale is None."""
+    """
+    Scale the mesh so its metric height matches the mask at the placed range.
+
+    ``H_target = 2 R tan(α/2)``; ``s = H_target / H_ref`` where ``H_ref`` is
+    SAM3D height when known, otherwise ``ASSUMED_OBJECT_HEIGHT_M``. Missing
+    SAM3D never fails scale — degenerate α / range fall back to factor 1.0.
+    """
     if translation is None:
         return None, "missing_translation"
 
+    h_ref, assumed = _reference_height(object_height)
+    range_m = horizontal_range(translation)
+    alpha = mask_angular_height(binary)
     base = {
-        "object_height": float(object_height) if object_height is not None else None,
+        "object_height": None if assumed else h_ref,
+        "assumed_height": h_ref if assumed else None,
         "target_height": None,
-        "range_m": None,
-        "angular_height": None,
+        "range_m": float(range_m),
+        "angular_height": float(alpha),
         "range_method": range_method,
     }
 
-    if surface == "wall":
-        return {**base, "factor": 1.0, "method": "sam3d"}, None
-    if surface != "floor":
-        return None, "unknown_surface"
+    if alpha <= 1e-3 or range_m <= 1e-3:
+        return {**base, "factor": 1.0, "method": "assumed"}, None
 
-    if object_height is None or object_height <= 1e-3:
-        return None, "missing_object_height"
-
-    range_m = horizontal_range(translation)
-    alpha = mask_angular_height(binary)
-    base["range_m"] = float(range_m)
-    base["angular_height"] = float(alpha)
-
-    if range_method in ("floor", "wall_fraction"):
-        if alpha <= 1e-3:
-            return None, "missing_angular_height"
-        if range_m <= 1e-3:
-            return None, "range_too_small"
-        h_target = height_from_angular_size(alpha, range_m)
-        factor = float(h_target / object_height)
-        if not np.isfinite(factor) or factor <= 0.0:
-            return None, "non_finite_factor"
+    h_target = height_from_angular_size(alpha, range_m)
+    factor = float(h_target / h_ref)
+    if not np.isfinite(factor) or factor <= 0.0:
         return {
             **base,
-            "factor": float(np.clip(factor, min_scale, max_scale)),
-            "method": "room_distance",
+            "factor": 1.0,
+            "method": "assumed",
             "target_height": float(h_target),
         }, None
 
+    method = "angular" if range_method == "angular" else "room_distance"
+    scale = {
+        **base,
+        "factor": float(np.clip(factor, min_scale, max_scale)),
+        "method": method,
+        "target_height": float(h_target),
+    }
     if range_method == "angular":
-        scale = {
-            **base,
-            "factor": 1.0,
-            "method": "angular",
-            "target_height": float(object_height),
-        }
-        if alpha > 1e-3:
-            scale["angular_range_m"] = float(
-                range_from_angular_size(alpha, object_height)
-            )
-        return scale, None
-
-    return None, "no_scale_path"
+        scale["angular_range_m"] = float(range_from_angular_size(alpha, h_ref))
+    return scale, None
 
 
 def resolve_standing_pose(
@@ -511,10 +515,13 @@ def resolve_standing_pose(
     Chronological per contact UV:
       1) depth floor range (if depth) → 2) floor-plane ray → 3) wall ray
       4) yaw rotation (default upright if the wall heuristic fails)
-      5) mesh scale (floor needs SAM3D height; wall uses native scale)
+      5) mesh scale from mask angular height at the placed range, using
+         SAM3D height or ``ASSUMED_OBJECT_HEIGHT_M`` (SAM3D is optional)
+      6) if ranging was angular, one extra pass with the photo-implied
+         height so distance and scale stay consistent after room clamps
 
-    Translation or scale failure skips the object (never a guessed origin/size).
-    Rotation failure does not skip.
+    Translation failure skips the object (never a guessed origin). Missing
+    SAM3D height does not skip. Rotation failure does not skip.
 
     Returns
       (translation, contact_uv, surface, rotation, scale, error)
@@ -544,17 +551,42 @@ def resolve_standing_pose(
     translation_detail = None
     scale_detail = None
     saw_translation = False
+    h_seed, _ = _reference_height(object_height)
 
     for uv in uvs:
-        translation, surface, range_method, hit_wall, t_fail = _try_translation(
-            origin, direction=uv2equirectangular(uv), uv=uv, binary=binary,
-            data=data, depth=depth, object_height=object_height,
-        )
-        if translation is None:
-            translation_detail = t_fail
+        h_ref = h_seed
+        translation = surface = range_method = hit_wall = scale = None
+        for _ in range(2):
+            translation, surface, range_method, hit_wall, t_fail = _try_translation(
+                origin, direction=uv2equirectangular(uv), uv=uv, binary=binary,
+                data=data, depth=depth, object_height=h_ref,
+            )
+            if translation is None:
+                translation_detail = t_fail
+                break
+
+            saw_translation = True
+            scale, s_fail = _mesh_scale_or_reason(
+                binary, translation, surface, range_method,
+                object_height=object_height,
+            )
+            if scale is None:
+                scale_detail = s_fail
+                break
+
+            h_target = scale.get("target_height")
+            if (
+                range_method == "angular"
+                and h_target is not None
+                and abs(float(h_target) - h_ref) > 0.05 * max(h_ref, 1e-3)
+            ):
+                h_ref = float(h_target)
+                continue
+            break
+
+        if translation is None or scale is None:
             continue
 
-        saw_translation = True
         yaw, matrix, normal = resolve_standing_rotation(
             translation, data, wall=hit_wall
         )
@@ -562,13 +594,6 @@ def resolve_standing_pose(
             rotation = _yaw_rotation_dict(yaw, normal, range_method=range_method)
         else:
             rotation = default_standing_rotation(translation, range_method)
-
-        scale, s_fail = _mesh_scale_or_reason(
-            binary, translation, surface, range_method, object_height=object_height
-        )
-        if scale is None:
-            scale_detail = s_fail
-            continue
 
         return translation, uv, surface, rotation, scale, None
 
