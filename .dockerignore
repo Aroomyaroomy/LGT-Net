@@ -57,7 +57,6 @@ download_weights.py
 pipeline_config.json
 fix_dino.py
 visualization/compare_layout_furniture.py
-visualization/boundary.py
 visualization/grad.py
 visualization/visualizer/
 
