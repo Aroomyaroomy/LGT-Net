@@ -48,7 +48,7 @@ _LABEL_SCORE_RE = re.compile(r"^(?P<label>.*?)\s*\((?P<score>[0-9.]+)\)\s*$")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
 DEFAULT_FOOTPRINT_OUTSIDE_CORNERS = 3  # of 4 XZ corners
-DEFAULT_WALL_PENETRATION_M = 0.12
+DEFAULT_WALL_PENETRATION_M = 0.14
 DEFAULT_WALL_ATTACHMENT_M = 0.30
 DEFAULT_FLOOR_Y_TOL_M = 0.40
 DEFAULT_HEIGHT_CEILING_SLACK_M = 0.20
@@ -56,7 +56,24 @@ DEFAULT_WALL_Y_MARGIN_M = 0.05
 DEFAULT_HALF_XZ_MIN_M = 0.12
 DEFAULT_HALF_XZ_FRAC = 0.35
 DEFAULT_OBJECT_HEIGHT_M = 0.80
-DEFAULT_OVERLAP_RATIO = 0.20
+DEFAULT_OVERLAP_RATIO = 0.22
+
+# Typical standing heights used as the mesh-scale estimator (metres).
+# Longer keys win so concatenated DINO tokens like ``sofachairbed`` resolve.
+TYPICAL_OBJECT_HEIGHTS_M: dict[str, float] = {
+    "sofachairbed": 0.85,
+    "cabinetshelf": 0.90,
+    "bookshelf": 1.80,
+    "bookcase": 1.80,
+    "cabinet": 0.90,
+    "table": 0.75,
+    "desk": 0.75,
+    "chair": 0.85,
+    "shelf": 1.50,
+    "sofa": 0.85,
+    "couch": 0.85,
+    "bed": 0.55,
+}
 
 _DUMMY_LAYOUT = {
     "cameraHeight": 1.6,
@@ -77,6 +94,25 @@ def normalize_dino_label(label: str | None) -> str | None:
         text = match.group("label").strip()
     text = _NON_ALNUM_RE.sub("", text.lower().strip())
     return text or None
+
+
+def typical_height_for_label(
+    label: str | None,
+    default: float | None = DEFAULT_OBJECT_HEIGHT_M,
+) -> float | None:
+    """Class-typical standing height in metres, or ``default`` when unknown."""
+    token = normalize_dino_label(label)
+    if token:
+        for key in sorted(TYPICAL_OBJECT_HEIGHTS_M, key=len, reverse=True):
+            if key in token:
+                return float(TYPICAL_OBJECT_HEIGHTS_M[key])
+    if default is None:
+        return None
+    try:
+        value = float(default)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) and value > 1e-4 else None
 
 
 def expected_surface_for_label(label: str | None) -> str | None:
@@ -186,7 +222,19 @@ def placement_half_extents(
         height = float(scale["object_height"]) * float(scale.get("factor") or 1.0)
     if height is None or not np.isfinite(height) or height <= 1e-4:
         height = float(default_height)
-    half_xz = max(float(half_xz_min), float(half_xz_frac) * height)
+    native_xz = scale.get("native_xz")
+    factor = float(scale.get("factor") or 1.0)
+    if native_xz is not None:
+        try:
+            half_xz = 0.5 * factor * float(native_xz)
+        except (TypeError, ValueError):
+            half_xz = 0.0
+        if not np.isfinite(half_xz) or half_xz <= 1e-4:
+            half_xz = max(float(half_xz_min), float(half_xz_frac) * height)
+        else:
+            half_xz = max(float(half_xz_min), float(half_xz))
+    else:
+        half_xz = max(float(half_xz_min), float(half_xz_frac) * height)
     return half_xz, height, half_xz
 
 

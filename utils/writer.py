@@ -53,4 +53,3 @@ def xyz2json(xyz, ratio, camera_height=1.6):
         data['layoutWalls']['walls'].append(tmp)
 
     return data
-

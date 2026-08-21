@@ -251,13 +251,30 @@ def predict(
     placement_success = 0
     placement_failure = 0
     if mask_dir is not None:
-        placements, placement_success, placement_failure = placements_from_mask_dir(
+        placed = placements_from_mask_dir(
             mask_dir,
             json_data,
             depth=tensor2np(dt['depth'][0]),
             do_manhattan=pre_processing,
             vp_cache_path=vp_cache_path,
         )
+        # Host package returns (placements, success, failure); older images
+        # return placements only.
+        if isinstance(placed, tuple):
+            placements = placed[0]
+            if len(placed) > 1:
+                placement_success = int(placed[1])
+            if len(placed) > 2:
+                placement_failure = int(placed[2])
+        else:
+            placements = placed
+        if not placement_success and not placement_failure and placements:
+            placement_success = sum(
+                1
+                for p in placements
+                if p.get('translation') is not None and not p.get('error')
+            )
+            placement_failure = len(placements) - placement_success
         with open(os.path.join(job_dir, f'{job_id}_placements.json'), 'w', encoding='utf-8') as f:
             json.dump(
                 {

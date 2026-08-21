@@ -200,7 +200,7 @@ def wait_and_fetch_3d_job(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    NETWORK_RETRIES = 3
+    NETWORK_RETRIES = 12
     network_failures = 0
 
     for attempt in range(1, max_attempts + 1):
@@ -216,6 +216,20 @@ def wait_and_fetch_3d_job(
             print(f"  [SAM3D] network error (retry {network_failures}/{NETWORK_RETRIES}): {e}")
             time.sleep(interval)
             continue
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else None
+            if code in (502, 503, 504):
+                network_failures += 1
+                if network_failures > NETWORK_RETRIES:
+                    raise RuntimeError(
+                        f"SAM3D gateway error after {NETWORK_RETRIES} retries: {e}"
+                    ) from e
+                print(
+                    f"  [SAM3D] HTTP {code} (retry {network_failures}/{NETWORK_RETRIES})"
+                )
+                time.sleep(interval)
+                continue
+            raise
 
         print(f"  [SAM3D] status={status} (attempt {attempt}/{max_attempts})")
 

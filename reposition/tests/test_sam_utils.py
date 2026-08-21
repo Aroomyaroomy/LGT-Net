@@ -13,6 +13,7 @@ from reposition.sam_utils import (
     mask_index_from_name,
     merge_sam3d_orientations_into_placements,
     object_height_from_sam3d,
+    merge_sam3d_scale_into_placements,
     quat_xyzw_to_rotation_matrix,
     rotation_about_axis,
     sam3d_orientation_to_obj3d,
@@ -358,6 +359,179 @@ class TestMergeSam3DOrientationsIntoPlacements(unittest.TestCase):
             self.assertEqual(merged[0]["rotation"]["source"], "sam3d")
         finally:
             os.unlink(tmp)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# merge_sam3d_scale_into_placements
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestMergeSam3DScaleIntoPlacements(unittest.TestCase):
+    def test_factor_from_class_typical_height(self):
+        placements = [
+            {
+                "mask": "mask_0.png",
+                "translation": [1.0, 1.6, 2.0],
+                "label": "chair",
+                "surface": "floor",
+                "scale": {
+                    "target_height": 2.2,
+                    "angular_height": 1.8,
+                    "range_m": 2.0,
+                    "factor": 1.0,
+                    "method": "assumed",
+                },
+            }
+        ]
+        metadata = {0: {"scale": 2.0}}
+        merged = merge_sam3d_scale_into_placements(
+            placements, metadata=metadata
+        )
+        scale = merged[0]["scale"]
+        self.assertEqual(scale["method"], "class_typical")
+        self.assertAlmostEqual(scale["typical_height"], 0.85)
+        self.assertAlmostEqual(scale["object_height"], 2.0)
+        self.assertAlmostEqual(scale["factor"], 0.85 / 2.0)
+        self.assertAlmostEqual(scale["target_height"], 0.85)
+        np.testing.assert_allclose(merged[0]["translation"], [1.0, 1.6, 2.0])
+
+    def test_clips_factor(self):
+        placements = [
+            {
+                "mask": "mask_0.png",
+                "translation": [1.0, 1.6, 0.0],
+                "label": "bed",
+            }
+        ]
+        metadata = {0: {"scale": 0.01}}
+        merged = merge_sam3d_scale_into_placements(
+            placements, metadata=metadata
+        )
+        self.assertEqual(merged[0]["scale"]["factor"], 3.0)
+
+    def test_ignores_photometric_alpha(self):
+        placements = [
+            {
+                "mask": "mask_0.png",
+                "translation": [3.0, 1.6, 4.0],
+                "scale": {"angular_height": 1.8},
+            }
+        ]
+        metadata = {0: {"scale": 1.0}}
+        merged = merge_sam3d_scale_into_placements(
+            placements, metadata=metadata
+        )
+        scale = merged[0]["scale"]
+        self.assertEqual(scale["method"], "class_typical")
+        self.assertAlmostEqual(scale["typical_height"], 0.80)
+        self.assertAlmostEqual(scale["factor"], 0.80)
+        self.assertAlmostEqual(scale["target_height"], 0.80)
+
+    def test_skips_missing_translation(self):
+        placements = [{"mask": "mask_0.png", "translation": None}]
+        metadata = {0: {"scale": 1.5}}
+        merged = merge_sam3d_scale_into_placements(
+            placements, metadata=metadata
+        )
+        self.assertIsNone(merged[0].get("scale"))
+
+    def test_passthrough_without_sam3d_height(self):
+        placements = [
+            {
+                "mask": "mask_0.png",
+                "translation": [1.0, 1.6, 1.0],
+                "scale": {"target_height": 0.9, "factor": 1.0, "method": "assumed"},
+            }
+        ]
+        merged = merge_sam3d_scale_into_placements(placements, metadata={})
+        self.assertEqual(merged[0]["scale"]["method"], "assumed")
+        self.assertAlmostEqual(merged[0]["scale"]["factor"], 1.0)
+        self.assertAlmostEqual(merged[0]["scale"]["typical_height"], 0.80)
+
+    def test_does_not_use_metadata_scale_as_factor(self):
+        placements = [
+            {
+                "mask": "mask_0.png",
+                "translation": [1.0, 1.6, 0.0],
+                "label": "table",
+            }
+        ]
+        metadata = {0: {"scale": [[0.55]]}}
+        merged = merge_sam3d_scale_into_placements(
+            placements, metadata=metadata
+        )
+        self.assertAlmostEqual(merged[0]["scale"]["object_height"], 0.55)
+        self.assertNotAlmostEqual(merged[0]["scale"]["factor"], 0.55)
+        self.assertAlmostEqual(
+            merged[0]["scale"]["factor"],
+            float(np.clip(0.75 / 0.55, 0.2, 3.0)),
+        )
+
+    def test_recovers_alpha_from_mask_file_as_diagnostic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mask = np.zeros((512, 1024), dtype=np.uint8)
+            mask[128:256, 400:600] = 255
+            mask_path = os.path.join(tmp, "mask_0.png")
+            import cv2
+
+            cv2.imwrite(mask_path, mask)
+            placements = [
+                {"mask": "mask_0.png", "translation": [0.0, 1.6, 2.0]}
+            ]
+            metadata = {0: {"scale": 1.0}}
+            merged = merge_sam3d_scale_into_placements(
+                placements, metadata=metadata, mask_dir=tmp
+            )
+            scale = merged[0]["scale"]
+            self.assertEqual(scale["method"], "class_typical")
+            self.assertAlmostEqual(scale["range_m"], 2.0)
+            self.assertGreater(scale["angular_height"], 0.2)
+            self.assertAlmostEqual(scale["typical_height"], 0.80)
+            self.assertIn("factor", scale)
+
+    def test_empty_and_none_metadata(self):
+        self.assertEqual(merge_sam3d_scale_into_placements([], metadata={}), [])
+        placements = [{"mask": "mask_0.png", "translation": [1.0, 1.6, 1.0]}]
+        merged = merge_sam3d_scale_into_placements(placements, metadata=None)
+        self.assertNotIn(merged[0].get("scale", {}).get("method"), {
+            "class_typical",
+            "class_typical_footprint",
+        })
+        self.assertNotIn("factor", merged[0].get("scale") or {})
+
+    def test_footprint_clip_shrinks_oversized_xz(self):
+        camera_height = 1.6
+        half = 0.40
+        layout = {
+            "cameraHeight": camera_height,
+            "layoutHeight": camera_height + 1.0,
+            "layoutPoints": {
+                "points": [
+                    {"xyz": [-half, camera_height, half]},
+                    {"xyz": [half, camera_height, half]},
+                    {"xyz": [half, camera_height, -half]},
+                    {"xyz": [-half, camera_height, -half]},
+                ]
+            },
+            "layoutWalls": {"walls": []},
+        }
+        placements = [
+            {
+                "mask": "mask_0.png",
+                "translation": [0.0, camera_height, 0.0],
+                "label": "chair",
+                "surface": "floor",
+            }
+        ]
+        metadata = {0: {"scale": 0.85}}
+        merged = merge_sam3d_scale_into_placements(
+            placements, metadata=metadata, layout=layout
+        )
+        scale = merged[0]["scale"]
+        self.assertEqual(scale["method"], "class_typical_footprint")
+        self.assertLess(scale["factor"], 1.0)
+        self.assertGreaterEqual(scale["factor"], 0.2)
+        half_xz = 0.5 * scale["factor"] * scale["native_xz"]
+        self.assertLessEqual(half_xz, half + 1e-3)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

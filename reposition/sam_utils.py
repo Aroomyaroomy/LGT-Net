@@ -5,7 +5,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .lgt_utils import _normalize
+from .lgt_utils import (
+    _normalize,
+    floor_polygon_from_layout,
+    height_from_angular_size,
+    horizontal_range,
+    mask_angular_height,
+    point_in_floor_polygon,
+)
 
 
 # SAM3D scene / create_3d_obj mesh share a Y-up convention (floor at negative Y).
@@ -202,17 +209,12 @@ def mask_index_from_name(mask_name: str) -> int | None:
     return int(match.group(1))
 
 
-def object_height_from_sam3d(
+def object_aabb_extents_from_sam3d(
     object_index: int,
     metadata: dict[int, dict] | None = None,
     furniture_dir: Path | str | None = None,
-) -> float | None:
-    """
-    Metric object height for angular-size ranging.
-
-    Prefers the Y extent of ``mesh_{i}.glb`` when present (export is already
-    scaled). Falls back to SAM3D ``scale`` as a unit-height proxy.
-    """
+) -> np.ndarray | None:
+    """Native GLB AABB extents ``(sx, sy, sz)``, else SAM3D scale as a unit cube."""
     if furniture_dir is not None:
         mesh_path = Path(furniture_dir) / f"mesh_{object_index}.glb"
         if mesh_path.is_file():
@@ -221,10 +223,12 @@ def object_height_from_sam3d(
 
                 mesh = o3d.io.read_triangle_mesh(str(mesh_path))
                 if not mesh.is_empty():
-                    extents = mesh.get_axis_aligned_bounding_box().get_extent()
-                    h = float(extents[1])
-                    if h > 1e-4:
-                        return h
+                    extents = np.asarray(
+                        mesh.get_axis_aligned_bounding_box().get_extent(),
+                        dtype=np.float64,
+                    ).reshape(3)
+                    if float(extents[1]) > 1e-4:
+                        return extents
             except Exception:
                 pass
 
@@ -236,8 +240,28 @@ def object_height_from_sam3d(
                 s = s[0]
             s = float(s)
             if s > 1e-4:
-                return s
+                return np.array([s, s, s], dtype=np.float64)
     return None
+
+
+def object_height_from_sam3d(
+    object_index: int,
+    metadata: dict[int, dict] | None = None,
+    furniture_dir: Path | str | None = None,
+) -> float | None:
+    """
+    Metric object height for angular-size ranging.
+
+    Prefers the Y extent of ``mesh_{i}.glb`` when present (export is already
+    scaled). Falls back to SAM3D ``scale`` as a unit-height proxy.
+    """
+    extents = object_aabb_extents_from_sam3d(
+        object_index, metadata=metadata, furniture_dir=furniture_dir
+    )
+    if extents is None:
+        return None
+    h = float(extents[1])
+    return h if h > 1e-4 else None
 
 
 def merge_sam3d_orientations_into_placements(
@@ -276,5 +300,241 @@ def merge_sam3d_orientations_into_placements(
             "source": "sam3d",
             "frame": "obj3d",
         }
+        merged.append(record)
+    return merged
+
+
+_DEFAULT_SCALE_CLIP = (0.2, 3.0)
+
+
+def _metadata_from_arg(
+    metadata: dict[int, dict] | Path | str | None,
+) -> dict[int, dict] | None:
+    if metadata is None:
+        return None
+    if isinstance(metadata, dict):
+        return metadata
+    return load_sam3d_metadata(metadata)
+
+
+def _angular_height_from_mask_file(
+    mask_dir: Path | str | None, mask_name: str | None
+) -> float | None:
+    if not mask_dir or not mask_name:
+        return None
+    path = Path(mask_dir) / Path(mask_name).name
+    if not path.is_file():
+        return None
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+    alpha = float(mask_angular_height(img > 0))
+    return alpha if alpha > 1e-3 else None
+
+
+def _placement_photometric_height(placement: dict, mask_dir: Path | str | None):
+    """``(h_target, alpha, range_m)`` from stored scale, else mask α and translation."""
+    scale = placement.get("scale") if isinstance(placement.get("scale"), dict) else {}
+    translation = placement.get("translation")
+
+    range_m = scale.get("range_m")
+    if range_m is None and translation is not None:
+        try:
+            range_m = horizontal_range(translation)
+        except Exception:
+            range_m = None
+    try:
+        range_m = float(range_m) if range_m is not None else None
+    except (TypeError, ValueError):
+        range_m = None
+    if range_m is not None and range_m <= 1e-3:
+        range_m = None
+
+    alpha = scale.get("angular_height")
+    try:
+        alpha = float(alpha) if alpha is not None else None
+    except (TypeError, ValueError):
+        alpha = None
+    if alpha is None or alpha <= 1e-3:
+        alpha = _angular_height_from_mask_file(mask_dir, placement.get("mask"))
+
+    h_target = scale.get("target_height")
+    try:
+        h_target = float(h_target) if h_target is not None else None
+    except (TypeError, ValueError):
+        h_target = None
+    if (h_target is None or h_target <= 1e-4) and alpha is not None and range_m is not None:
+        h_target = float(height_from_angular_size(alpha, range_m))
+    if h_target is not None and h_target <= 1e-4:
+        h_target = None
+
+    return h_target, alpha, range_m
+
+
+def _xz_half_extent(native_xz: float, factor: float) -> float:
+    return 0.5 * float(factor) * float(native_xz)
+
+
+def _aabb_inside_footprint(translation, half_xz: float, polygon: np.ndarray) -> bool:
+    cx, cz = float(translation[0]), float(translation[2])
+    poly = np.asarray(polygon, dtype=np.float32).reshape(-1, 2)
+    h = float(half_xz)
+    for dx, dz in ((-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)):
+        dist = float(cv2.pointPolygonTest(poly, (cx + dx * h, cz + dz * h), True))
+        if dist < 0.0:
+            return False
+    return True
+
+
+def clip_scale_factor_to_footprint(
+    translation,
+    factor: float,
+    native_xz: float,
+    layout: dict | None,
+    *,
+    min_scale: float = _DEFAULT_SCALE_CLIP[0],
+    surface: str | None = None,
+) -> tuple[float, bool]:
+    """Shrink ``factor`` until the XZ AABB lies in the layout floor polygon.
+
+    Does not move the translation. Wall-mounted items and placements whose
+    centre is already outside the footprint are left unchanged.
+    """
+    factor = float(factor)
+    if layout is None or surface == "wall":
+        return factor, False
+    if native_xz is None or float(native_xz) <= 1e-4 or not np.isfinite(factor):
+        return factor, False
+    try:
+        polygon = floor_polygon_from_layout(layout)
+    except (KeyError, TypeError, ValueError):
+        return factor, False
+    if not point_in_floor_polygon(translation, polygon):
+        return factor, False
+
+    lo = float(min_scale)
+    if _aabb_inside_footprint(translation, _xz_half_extent(native_xz, factor), polygon):
+        return factor, False
+    if not _aabb_inside_footprint(translation, _xz_half_extent(native_xz, lo), polygon):
+        return lo, True
+
+    hi = factor
+    for _ in range(24):
+        mid = 0.5 * (lo + hi)
+        if _aabb_inside_footprint(translation, _xz_half_extent(native_xz, mid), polygon):
+            lo = mid
+        else:
+            hi = mid
+    return float(lo), True
+
+
+def merge_sam3d_scale_into_placements(
+    placements: list[dict],
+    furniture_dir: Path | str | None = None,
+    metadata: dict[int, dict] | Path | str | None = None,
+    mask_dir: Path | str | None = None,
+    min_scale: float = _DEFAULT_SCALE_CLIP[0],
+    max_scale: float = _DEFAULT_SCALE_CLIP[1],
+    layout: dict | None = None,
+    boxes=None,
+    label_map: dict | None = None,
+) -> list[dict]:
+    """
+    Scale each mesh from a class-typical height, then clip to the floor polygon.
+
+    ``H_target`` is the typical standing height for the DINO label (chair 0.85 m,
+    table 0.75 m, bed 0.55 m, sofa 0.85 m, else 0.80 m). ``factor`` is
+    ``clip(H_target / H_mesh)`` where ``H_mesh`` is the exported GLB Y-extent,
+    else SAM3D metadata scale as a unit-height proxy.
+
+    When ``layout`` is provided, floor objects are then shrunk uniformly until
+    their XZ AABB lies inside the footprint. Photometric α / R are stored only
+    as diagnostics and do not drive size.
+    """
+    if not placements:
+        return placements
+
+    from .quality_control import (
+        DEFAULT_HALF_XZ_FRAC,
+        DEFAULT_OBJECT_HEIGHT_M,
+        label_map_from_dino_boxes,
+        typical_height_for_label,
+    )
+
+    meta = _metadata_from_arg(metadata)
+    furn = Path(furniture_dir) if furniture_dir is not None else None
+    lo, hi = float(min_scale), float(max_scale)
+    if label_map is None and boxes is not None:
+        label_map = label_map_from_dino_boxes(boxes)
+
+    merged = []
+    for placement in placements:
+        record = dict(placement)
+        if record.get("translation") is None:
+            merged.append(record)
+            continue
+
+        idx = mask_index_from_name(record.get("mask") or "")
+        if label_map and idx is not None and record.get("label") is None:
+            info = label_map.get(idx)
+            if info:
+                record["label"] = info.get("label")
+                if record.get("dino") is None:
+                    record["dino"] = {
+                        "label": info.get("label"),
+                        "raw_label": info.get("raw_label"),
+                        "score": info.get("score"),
+                    }
+
+        extents = (
+            object_aabb_extents_from_sam3d(idx, metadata=meta, furniture_dir=furn)
+            if idx is not None
+            else None
+        )
+        h_mesh = float(extents[1]) if extents is not None else None
+        native_xz = (
+            float(np.hypot(float(extents[0]), float(extents[2])))
+            if extents is not None
+            else None
+        )
+        _, alpha, range_m = _placement_photometric_height(record, mask_dir)
+
+        typical = typical_height_for_label(record.get("label"))
+        if typical is None:
+            typical = float(DEFAULT_OBJECT_HEIGHT_M)
+        h_target = float(typical)
+
+        prev = record.get("scale") if isinstance(record.get("scale"), dict) else {}
+        scale = dict(prev)
+        if alpha is not None:
+            scale["angular_height"] = float(alpha)
+        if range_m is not None:
+            scale["range_m"] = float(range_m)
+        scale["typical_height"] = float(typical)
+
+        if h_mesh is not None and h_target > 1e-4:
+            factor = float(np.clip(h_target / h_mesh, lo, hi))
+            if native_xz is None or native_xz <= 1e-4:
+                native_xz = 2.0 * float(DEFAULT_HALF_XZ_FRAC) * h_mesh
+            clipped_factor, clipped = clip_scale_factor_to_footprint(
+                record["translation"],
+                factor,
+                native_xz,
+                layout,
+                min_scale=lo,
+                surface=record.get("surface"),
+            )
+            scale["object_height"] = float(h_mesh)
+            scale["native_xz"] = float(native_xz)
+            scale["factor"] = float(clipped_factor)
+            scale["target_height"] = float(clipped_factor * h_mesh)
+            scale["method"] = (
+                "class_typical_footprint" if clipped else "class_typical"
+            )
+            record["scale"] = scale
+        elif scale:
+            scale["target_height"] = float(h_target)
+            record["scale"] = scale
+
         merged.append(record)
     return merged

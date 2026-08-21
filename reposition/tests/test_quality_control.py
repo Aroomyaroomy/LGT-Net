@@ -24,6 +24,7 @@ from reposition.quality_control import (
     label_map_from_dino_boxes,
     mark_quality_rejections,
     normalize_dino_label,
+    typical_height_for_label,
 )
 
 
@@ -101,6 +102,22 @@ class TestNormalizeDinoLabel(unittest.TestCase):
     def test_empty(self):
         self.assertIsNone(normalize_dino_label(""))
         self.assertIsNone(normalize_dino_label(None))
+
+
+class TestTypicalHeightForLabel(unittest.TestCase):
+    def test_known_classes(self):
+        self.assertAlmostEqual(typical_height_for_label("chair"), 0.85)
+        self.assertAlmostEqual(typical_height_for_label("table"), 0.75)
+        self.assertAlmostEqual(typical_height_for_label("bed"), 0.55)
+        self.assertAlmostEqual(typical_height_for_label("sofa"), 0.85)
+
+    def test_concatenated_dino_tokens(self):
+        self.assertAlmostEqual(typical_height_for_label("sofachairbed"), 0.85)
+        self.assertAlmostEqual(typical_height_for_label("cabinetshelf"), 0.90)
+
+    def test_unknown_uses_default(self):
+        self.assertAlmostEqual(typical_height_for_label("lamp"), 0.80)
+        self.assertAlmostEqual(typical_height_for_label(None), 0.80)
 
 
 class TestExpectedSurface(unittest.TestCase):

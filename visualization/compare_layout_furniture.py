@@ -407,6 +407,483 @@ def create_ground_grid(
     return [grid]
 
 
+SCREENSHOT_VIEWS = {
+    # Open3D ViewControl: camera sits at lookat + front * distance and
+    # looks toward lookat. `front` is from the scene toward the camera.
+    # Iso-style elevations (same pitch, yawed 90°) so every shot shows
+    # the full open hull instead of one wall face.
+    "iso": {"front": [0.55, 0.72, 0.42], "up": [0.0, 1.0, 0.0], "zoom": 0.70},
+    "top": {"front": [0.0, 1.0, 0.0], "up": [0.0, 0.0, -1.0], "zoom": 0.62},
+    "front": {"front": [0.42, 0.72, -0.55], "up": [0.0, 1.0, 0.0], "zoom": 0.70},
+    "side": {"front": [-0.55, 0.72, -0.42], "up": [0.0, 1.0, 0.0], "zoom": 0.70},
+}
+
+
+def layout_json_to_hull(
+    data: dict,
+    wall_color: np.ndarray = np.array([0.82, 0.86, 0.92]),
+    floor_color: np.ndarray = np.array([0.70, 0.76, 0.84]),
+    edge_color: np.ndarray = np.array([0.05, 0.05, 0.08]),
+):
+    """Build an exterior room hull from LGT ``xyz2json`` layout.
+
+    The panoramic ``*_3d.obj`` is an inward pano shell, so cameras sitting
+    inside it cannot show the whole footprint. This returns a low-poly
+    wall+floor mesh in the create_3d_obj / Open3D frame (floor at
+    ``y = -cameraHeight``) plus a LineSet of edges.
+
+    Metric sizes follow the JSON as-is (no 1.6 m rescale).
+    """
+    import open3d as o3d
+    from reposition.lgt_utils import json_frame_to_obj3d
+
+    points = (data.get("layoutPoints") or {}).get("points") or []
+    walls = (data.get("layoutWalls") or {}).get("walls") or []
+    if len(points) < 3:
+        raise ValueError("layout JSON needs at least 3 layoutPoints")
+
+    camera_height = float(data["cameraHeight"])
+    ceiling_h = float(
+        data.get("cameraCeilingHeight", float(data.get("layoutHeight", camera_height)) - camera_height)
+    )
+
+    def _corner(idx: int, json_y: float) -> np.ndarray:
+        xyz = np.asarray(points[int(idx)]["xyz"], dtype=np.float64).reshape(3)
+        xyz[1] = json_y
+        return json_frame_to_obj3d(xyz)
+
+    n = len(points)
+    floor_y_json = camera_height
+    ceil_y_json = -ceiling_h
+    floor_pts = np.stack([_corner(i, floor_y_json) for i in range(n)], axis=0)
+    ceil_pts = np.stack([_corner(i, ceil_y_json) for i in range(n)], axis=0)
+
+    verts: List[np.ndarray] = []
+    tris: List[List[int]] = []
+    colors: List[np.ndarray] = []
+    edge_pts: List[np.ndarray] = []
+    edge_idx: List[List[int]] = []
+
+    def _add_tri(a, b, c, color) -> None:
+        base = len(verts)
+        verts.extend([a, b, c])
+        tris.append([base, base + 1, base + 2])
+        colors.extend([color, color, color])
+
+    def _add_edge(a, b) -> None:
+        i0 = len(edge_pts)
+        edge_pts.extend([a, b])
+        edge_idx.append([i0, i0 + 1])
+
+    pairs = []
+    if walls:
+        for wall in walls:
+            idx = wall.get("pointsIdx") or []
+            if len(idx) >= 2:
+                pairs.append((int(idx[0]) % n, int(idx[1]) % n))
+    if not pairs:
+        pairs = [(i, (i + 1) % n) for i in range(n)]
+
+    for i, j in pairs:
+        f0, f1 = floor_pts[i], floor_pts[j]
+        c0, c1 = ceil_pts[i], ceil_pts[j]
+        _add_tri(f0, f1, c1, wall_color)
+        _add_tri(f0, c1, c0, wall_color)
+        _add_edge(f0, f1)
+        _add_edge(c0, c1)
+        _add_edge(f0, c0)
+        _add_edge(f1, c1)
+
+    # Filled floor so top/iso cameras show the whole footprint (open ceiling).
+    try:
+        from visualization.visualizer.earcut import earcut
+
+        xz_flat: List[float] = []
+        for p in floor_pts:
+            xz_flat.extend([float(p[0]), float(p[2])])
+        indices = np.asarray(earcut(xz_flat), dtype=np.int32)
+        if indices.size >= 3:
+            for a, b, c in indices.reshape(-1, 3):
+                _add_tri(floor_pts[int(a)], floor_pts[int(b)], floor_pts[int(c)], floor_color)
+    except Exception:
+        pass
+
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(np.asarray(verts, dtype=np.float64))
+    mesh.triangles = o3d.utility.Vector3iVector(np.asarray(tris, dtype=np.int32))
+    mesh.vertex_colors = o3d.utility.Vector3dVector(np.asarray(colors, dtype=np.float64))
+    mesh.compute_vertex_normals()
+
+    lines = o3d.geometry.LineSet()
+    lines.points = o3d.utility.Vector3dVector(np.asarray(edge_pts, dtype=np.float64))
+    lines.lines = o3d.utility.Vector2iVector(np.asarray(edge_idx, dtype=np.int32))
+    lines.colors = o3d.utility.Vector3dVector(
+        np.tile(edge_color.reshape(1, 3), (len(edge_idx), 1))
+    )
+    return mesh, lines
+
+
+def _normalize(v: np.ndarray) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float64).reshape(3)
+    n = float(np.linalg.norm(v))
+    if n < 1e-12:
+        raise ValueError("zero-length vector")
+    return v / n
+
+
+def _open3d_front_up(front: np.ndarray, up: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Normalize ViewControl vectors: ``front`` is lookat → camera.
+
+    Open3D computes ``right = up × front`` itself; only replace ``up`` when
+    it is parallel to ``front`` so that cross product would vanish.
+    """
+    front = _normalize(front)
+    up = _normalize(up)
+    if abs(float(np.dot(front, up))) > 0.98:
+        up = np.array([0.0, 0.0, -1.0] if abs(front[1]) > 0.9 else [0.0, 1.0, 0.0])
+        up = _normalize(up)
+    return front, up
+
+
+def _framing_eye(
+    center: np.ndarray,
+    front: np.ndarray,
+    up: np.ndarray,
+    bounds: np.ndarray,
+    padding: float,
+    vfov_deg: float,
+    aspect: float,
+) -> np.ndarray:
+    """Camera position (Open3D front = lookat → camera) so the AABB fills the frame."""
+    vfov_half = np.deg2rad(float(vfov_deg) * 0.5)
+    hfov_half = np.arctan(np.tan(vfov_half) * float(aspect))
+    front, up = _open3d_front_up(front, up)
+    right = _normalize(np.cross(up, front))
+    lo = np.asarray(bounds[0], dtype=np.float64).reshape(3)
+    hi = np.asarray(bounds[1], dtype=np.float64).reshape(3)
+    center = np.asarray(center, dtype=np.float64).reshape(3)
+    corners = np.array(
+        [
+            [x, y, z]
+            for x in (lo[0], hi[0])
+            for y in (lo[1], hi[1])
+            for z in (lo[2], hi[2])
+        ],
+        dtype=np.float64,
+    )
+    rel = corners - center.reshape(1, 3)
+    half_w = float(np.max(np.abs(rel @ right)))
+    half_h = float(np.max(np.abs(rel @ up)))
+    dist = max(
+        half_h / max(float(np.tan(vfov_half)), 1e-6),
+        half_w / max(float(np.tan(hfov_half)), 1e-6),
+        0.5,
+    ) * float(padding)
+    return center + front * dist
+
+
+def _material_for_geometry(geom):
+    import open3d as o3d
+
+    mat = o3d.visualization.rendering.MaterialRecord()
+    if hasattr(geom, "lines") and not hasattr(geom, "triangles"):
+        mat.shader = "unlitLine"
+        mat.line_width = 3.0
+        mat.base_color = [0.08, 0.08, 0.10, 1.0]
+        return mat
+    mat.base_color = [1.0, 1.0, 1.0, 1.0]
+    textures = getattr(geom, "textures", None)
+    if textures:
+        mat.shader = "defaultLit"
+        try:
+            mat.albedo_img = textures[0]
+        except Exception:
+            pass
+        return mat
+    if hasattr(geom, "has_vertex_colors") and geom.has_vertex_colors():
+        mat.shader = "defaultUnlit"
+        return mat
+    mat.shader = "defaultLit"
+    return mat
+
+
+def fit_view_control(
+    ctr,
+    center: np.ndarray,
+    front: np.ndarray,
+    up: np.ndarray,
+    bounds: Optional[np.ndarray] = None,
+    radius: Optional[float] = None,
+    padding: float = 1.18,
+) -> None:
+    """Place an Open3D camera so the scene AABB fills the frame.
+
+    ``front`` is the look direction (camera toward the scene). ``up`` is
+    orthonormalized against ``front``. Distance is computed from the AABB
+    projected onto the camera axes and the current pinhole FOV, so iso /
+    top / elevation views all show the whole room.
+    """
+    front = _normalize(front)
+    up = _normalize(up)
+    up = up - front * float(np.dot(up, front))
+    if float(np.linalg.norm(up)) < 1e-8:
+        up = np.array([0.0, 1.0, 0.0] if abs(front[1]) < 0.9 else [0.0, 0.0, 1.0])
+        up = up - front * float(np.dot(up, front))
+    up = _normalize(up)
+    right = np.cross(front, up)
+    if float(np.linalg.norm(right)) < 1e-8:
+        up = np.array([0.0, 0.0, 1.0] if abs(front[1]) > 0.9 else [0.0, 1.0, 0.0])
+        up = _normalize(up - front * float(np.dot(up, front)))
+        right = np.cross(front, up)
+    right = _normalize(right)
+    up = _normalize(np.cross(right, front))
+
+    params = ctr.convert_to_pinhole_camera_parameters()
+    K = np.asarray(params.intrinsic.intrinsic_matrix, dtype=np.float64)
+    fx = float(max(K[0, 0], 1e-6))
+    fy = float(max(K[1, 1], 1e-6))
+    iw = float(max(params.intrinsic.width, 1))
+    ih = float(max(params.intrinsic.height, 1))
+    hfov_half = np.arctan(iw / (2.0 * fx))
+    vfov_half = np.arctan(ih / (2.0 * fy))
+
+    center = np.asarray(center, dtype=np.float64).reshape(3)
+    if bounds is not None:
+        lo = np.asarray(bounds[0], dtype=np.float64).reshape(3)
+        hi = np.asarray(bounds[1], dtype=np.float64).reshape(3)
+        corners = np.array(
+            [
+                [x, y, z]
+                for x in (lo[0], hi[0])
+                for y in (lo[1], hi[1])
+                for z in (lo[2], hi[2])
+            ],
+            dtype=np.float64,
+        )
+        rel = corners - center.reshape(1, 3)
+        half_w = float(np.max(np.abs(rel @ right)))
+        half_h = float(np.max(np.abs(rel @ up)))
+        dist = max(
+            half_h / max(float(np.tan(vfov_half)), 1e-6),
+            half_w / max(float(np.tan(hfov_half)), 1e-6),
+            0.5,
+        )
+    else:
+        dist = float(radius if radius is not None else 2.0) / max(
+            float(np.tan(vfov_half)), 1e-6
+        )
+    dist *= float(padding)
+    eye = center - front * dist
+
+    # Open3D / OpenGL camera looks along -Z in camera space.
+    rot = np.stack([right, up, -front], axis=0)
+    extrinsic = np.eye(4, dtype=np.float64)
+    extrinsic[:3, :3] = rot
+    extrinsic[:3, 3] = -rot @ eye
+
+    params.extrinsic = extrinsic
+    try:
+        ctr.convert_from_pinhole_camera_parameters(params, allow_arbitrary=True)
+    except TypeError:
+        ctr.convert_from_pinhole_camera_parameters(params)
+
+
+def scene_aabb(geometries) -> Optional[np.ndarray]:
+    """Return stacked (min, max) of triangle-mesh / line-set AABBs, or None."""
+    mins, maxs = [], []
+    for geom in geometries:
+        if not hasattr(geom, "get_axis_aligned_bounding_box"):
+            continue
+        try:
+            n_tris = len(geom.triangles) if hasattr(geom, "triangles") else 10**9
+        except Exception:
+            n_tris = 10**9
+        if n_tris == 0:
+            continue
+        box = geom.get_axis_aligned_bounding_box()
+        mins.append(np.asarray(box.min_bound, dtype=np.float64))
+        maxs.append(np.asarray(box.max_bound, dtype=np.float64))
+    if not mins:
+        return None
+    lo = np.min(np.stack(mins), axis=0)
+    hi = np.max(np.stack(maxs), axis=0)
+    return np.stack([lo, hi], axis=0)
+
+
+def capture_fitted_screenshots(
+    geometries: list,
+    save_screenshot: str,
+    views: Optional[dict] = None,
+    padding: float = 1.22,
+    width: int = 1600,
+    height: int = 900,
+    verbose: bool = True,
+) -> List[str]:
+    """Capture iso/top/front/side stills with the camera fitted to the scene AABB."""
+    import open3d as o3d
+
+    folder, stem = _screenshot_output_folder(save_screenshot)
+    os.makedirs(folder, exist_ok=True)
+    views = views or SCREENSHOT_VIEWS
+
+    bounds = scene_aabb(geometries)
+    if bounds is None:
+        center = np.zeros(3, dtype=np.float64)
+        bounds = np.stack([-np.ones(3), np.ones(3)])
+    else:
+        lo, hi = bounds
+        center = 0.5 * (lo + hi)
+        if verbose:
+            extent = hi - lo
+            print(
+                f"  [VIZ] scene AABB extent=({extent[0]:.2f}, {extent[1]:.2f}, "
+                f"{extent[2]:.2f}) m"
+            )
+
+    vfov_deg = 48.0
+    aspect = float(width) / float(max(height, 1))
+    saved: List[str] = []
+
+    def _copy_front_top(paths: List[str]) -> None:
+        dest_dir = (
+            os.path.dirname(folder)
+            if os.path.basename(folder).lower() == "screenshots"
+            else folder
+        )
+        for path in paths:
+            stem_name = os.path.splitext(os.path.basename(path))[0]
+            if stem_name.endswith("_front"):
+                _copy(path, os.path.join(dest_dir, "front_facing.png"))
+            elif stem_name.endswith("_top"):
+                _copy(path, os.path.join(dest_dir, "top_to_bottom.png"))
+
+    # Filament offscreen needs EGL headless; skip it on Windows.
+    if os.name != "nt":
+        try:
+            renderer = o3d.visualization.rendering.OffscreenRenderer(width, height)
+            renderer.scene.set_background([0.93, 0.93, 0.94, 1.0])
+            try:
+                renderer.scene.scene.set_sun_light(
+                    [-0.45, -0.85, -0.28], [1.0, 1.0, 1.0], 75000
+                )
+                renderer.scene.scene.enable_sun_light(True)
+            except Exception:
+                pass
+            for i, geom in enumerate(geometries):
+                renderer.scene.add_geometry(f"g{i}", geom, _material_for_geometry(geom))
+
+            for name, view in views.items():
+                front, up = _open3d_front_up(
+                    np.asarray(view["front"], dtype=np.float64),
+                    np.asarray(view["up"], dtype=np.float64),
+                )
+                eye = _framing_eye(
+                    center,
+                    front,
+                    up,
+                    bounds,
+                    padding=float(view.get("padding", padding)),
+                    vfov_deg=vfov_deg,
+                    aspect=aspect,
+                )
+                renderer.setup_camera(vfov_deg, center, eye, up)
+                img = renderer.render_to_image()
+                out_path = os.path.join(folder, f"{stem}_{name}.png")
+                o3d.io.write_image(out_path, img)
+                saved.append(out_path)
+                if verbose:
+                    print(f"  [VIZ] screenshot -> {os.path.abspath(out_path)}")
+            del renderer
+            _copy_front_top(saved)
+            return saved
+        except Exception as exc:
+            if verbose:
+                print(f"  [VIZ] offscreen renderer unused ({exc}); using Open3D zoom")
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(visible=False, width=width, height=height)
+    for geom in geometries:
+        vis.add_geometry(geom)
+    opt = vis.get_render_option()
+    opt.mesh_show_back_face = True
+    opt.background_color = np.array([0.93, 0.93, 0.94])
+    opt.line_width = 3.0
+
+    vis.poll_events()
+    vis.update_renderer()
+    vis.reset_view_point(True)
+
+    ctr = vis.get_view_control()
+    for name, view in views.items():
+        front, up = _open3d_front_up(
+            np.asarray(view["front"], dtype=np.float64),
+            np.asarray(view["up"], dtype=np.float64),
+        )
+        ctr.set_lookat(center.tolist())
+        ctr.set_front(front.tolist())
+        ctr.set_up(up.tolist())
+        # Open3D: distance = zoom * bbox_extent / tan(fov/2). 0.7 is default.
+        ctr.set_zoom(float(view.get("zoom", 0.68)))
+        vis.poll_events()
+        vis.update_renderer()
+        out_path = os.path.join(folder, f"{stem}_{name}.png")
+        vis.capture_screen_image(out_path, do_render=True)
+        saved.append(out_path)
+        if verbose:
+            print(f"  [VIZ] screenshot -> {os.path.abspath(out_path)}")
+    vis.destroy_window()
+    _copy_front_top(saved)
+    return saved
+
+
+def save_layout_floorplan(data: dict, path: str, side_l: int = 800) -> str:
+    """Write a 2D top-down floorplan PNG from layout JSON (obj3d XZ)."""
+    from PIL import Image
+
+    from reposition.lgt_utils import json_frame_to_obj3d
+    from visualization.floorplan import draw_floorplan
+
+    xz = []
+    for p in (data.get("layoutPoints") or {}).get("points") or []:
+        m = json_frame_to_obj3d(p["xyz"])
+        xz.append([float(m[0]), float(m[2])])
+    xz = np.asarray(xz, dtype=np.float64)
+    board = draw_floorplan(
+        xz,
+        fill_color=[0.78, 0.84, 0.92],
+        border_color=[0.12, 0.18, 0.32],
+        side_l=int(side_l),
+        marker_color=[0.82, 0.22, 0.18],
+        center_color=[0.15, 0.55, 0.28],
+        scale=1.15,
+    )
+    img = (np.clip(board, 0.0, 1.0) * 255.0).astype(np.uint8)
+    if img.ndim == 2:
+        img = np.repeat(img[..., None], 3, axis=2)
+    # Empty canvas is black; paint leftover pixels light gray.
+    empty = np.all(img == 0, axis=2)
+    img[empty] = np.array([245, 245, 247], dtype=np.uint8)
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    Image.fromarray(img).save(path)
+    return path
+
+
+def _screenshot_output_folder(save_screenshot: str) -> Tuple[str, str]:
+    path = os.path.abspath(save_screenshot)
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".png", ".jpg", ".jpeg"}:
+        parent = os.path.dirname(path)
+        return os.path.join(parent, "screenshots"), os.path.splitext(os.path.basename(path))[0]
+    return path, "layout_furniture"
+
+
+def _copy(src: str, dst: str) -> None:
+    import shutil
+
+    os.makedirs(os.path.dirname(os.path.abspath(dst)) or ".", exist_ok=True)
+    shutil.copy2(src, dst)
+
+
 def create_coordinate_frame(size: float = 1.0) -> "open3d.geometry.TriangleMesh":
     """创建 RGB 三色坐标轴（X=红, Y=绿, Z=蓝），用于判断场景朝向。
 
@@ -427,6 +904,7 @@ def create_coordinate_frame(size: float = 1.0) -> "open3d.geometry.TriangleMesh"
 
 def compare_layout_and_furniture(
     room_path: Optional[str] = None,
+    layout_json: Optional[Union[str, dict]] = None,
     furniture_paths: Optional[List[str]] = None,
     room_color: np.ndarray = ROOM_DEFAULT_COLOR,
     furniture_colors: Optional[List[np.ndarray]] = None,
@@ -528,7 +1006,22 @@ def compare_layout_and_furniture(
 
     # ---- 1. 加载房间结构 mesh ----
     room_mesh = None
-    if room_path is not None:
+    layout_data = None
+    if layout_json is not None:
+        if isinstance(layout_json, dict):
+            layout_data = layout_json
+        else:
+            import json as _json
+            with open(layout_json, encoding="utf-8") as f:
+                layout_data = _json.load(f)
+        if verbose:
+            print(f"\n{'='*60}")
+            print(f"  加载 LGT-Net 布局 JSON 外壳")
+            print(f"{'='*60}")
+        room_mesh, edges = layout_json_to_hull(layout_data)
+        geometries.append(room_mesh)
+        geometries.append(edges)
+    elif room_path is not None:
         if verbose:
             print(f"\n{'='*60}")
             print(f"  加载 LGT-Net 房间结构")
@@ -624,19 +1117,22 @@ def compare_layout_and_furniture(
             print(f"[错误] Open3D 可视化失败: {e}")
             print("  请检查 mesh 数据是否有效，或尝试仅加载单个文件进行排查")
 
-    # ---- 6. 可选截图 ----
+    # ---- 6. 可选截图（AABB-fitted iso/top/front/side） ----
     if save_screenshot and geometries:
         try:
-            vis = o3d.visualization.Visualizer()
-            vis.create_window(window_name=window_title, width=1280, height=720)
-            for g in geometries:
-                vis.add_geometry(g)
-            vis.poll_events()
-            vis.update_renderer()
-            vis.capture_screen_image(save_screenshot)
-            vis.destroy_window()
-            if verbose:
-                print(f"  截图已保存: {save_screenshot}")
+            saved = capture_fitted_screenshots(
+                geometries,
+                save_screenshot,
+                verbose=verbose,
+            )
+            if layout_data is not None:
+                dest_dir = os.path.dirname(saved[0]) if saved else os.path.abspath(save_screenshot)
+                if os.path.basename(dest_dir).lower() == "screenshots":
+                    dest_dir = os.path.dirname(dest_dir)
+                fp_path = os.path.join(dest_dir, "floorplan.png")
+                save_layout_floorplan(layout_data, fp_path)
+                if verbose:
+                    print(f"  [VIZ] floorplan -> {os.path.abspath(fp_path)}")
         except Exception as e:
             print(f"[警告] 截图失败: {e}")
 
@@ -749,6 +1245,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="LGT-Net 生成的房间结构 mesh 路径 (.obj / .gltf)",
+    )
+    input_group.add_argument(
+        "--layout_json",
+        type=str,
+        default=None,
+        help="LGT xyz2json 布局 JSON（优先于 --room_mesh，用于可看全屋的外壳）",
     )
     input_group.add_argument(
         "--furniture",
@@ -908,14 +1410,15 @@ def main():
                 print(f"自动识别房间文件: {room_path}")
 
     # ---- 参数校验 ----
-    if not room_path and not furniture_paths:
+    if not room_path and not furniture_paths and not args.layout_json:
         parser.error(
-            "请至少指定 --room_mesh/--room_dir 或 --furniture/--furniture_globs/--furniture_dir\n"
+            "请至少指定 --layout_json、--room_mesh/--room_dir 或 --furniture/--furniture_globs/--furniture_dir\n"
             "使用 --help 查看详细用法"
         )
 
     if verbose:
-        print(f"\n  房间: {room_path or '(无)'}")
+        print(f"\n  布局 JSON: {args.layout_json or '(无)'}")
+        print(f"  房间: {room_path or '(无)'}")
         print(f"  家具数量: {len(furniture_paths)}")
         for fp in furniture_paths:
             print(f"    - {Path(fp).name}")
@@ -923,6 +1426,7 @@ def main():
     # ---- 执行对比可视化 ----
     compare_layout_and_furniture(
         room_path=room_path,
+        layout_json=args.layout_json,
         furniture_paths=furniture_paths if furniture_paths else None,
         show_ground_grid=not args.no_grid,
         ground_grid_size=args.grid_size,

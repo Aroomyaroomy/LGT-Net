@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 import numpy as np
 import requests
 from typing import Optional, List, Literal
@@ -28,12 +29,12 @@ from get_pano_masks import (
 from gen_furniture_3d import wait_and_fetch_3d_job, submit_3d_job
 from reposition import (
     apply_placement_quality,
-    height_from_angular_size,
     json_frame_to_obj3d,
     json_rotation_to_obj3d,
     load_sam3d_metadata,
     mark_quality_rejections,
     merge_sam3d_orientations_into_placements,
+    merge_sam3d_scale_into_placements,
     placement_to_obj3d_frame,
     uprightness_metrics,
 )
@@ -42,10 +43,13 @@ from visualization.compare_layout_furniture import (
     ROOM_DEFAULT_COLOR,
     align_furniture_to_room,
     apply_uniform_color,
+    capture_fitted_screenshots,
     create_coordinate_frame,
     create_ground_grid,
+    layout_json_to_hull,
     load_mesh,
     load_room_mesh,
+    save_layout_floorplan,
     set_room_transparency,
     transform_mesh,
 )
@@ -445,16 +449,18 @@ def run_lgt_net(
             with open(mask_path, "rb") as f:
                 files.append(("masks", (os.path.basename(mask_path), f.read(), "image/png")))
 
+    form = {
+        "post_processing": post_processing,
+        "pre_processing": str(pre_processing).lower(),
+        "output_mesh": str(output_mesh).lower(),
+        "output_point_cloud": str(output_point_cloud).lower(),
+    }
+
     predict_response = requests.post(
         f"{service_url}/predict",
         headers=headers,
         files=files,
-        data={
-            "post_processing": post_processing,
-            "pre_processing": str(pre_processing).lower(),
-            "output_mesh": str(output_mesh).lower(),
-            "output_point_cloud": str(output_point_cloud).lower(),
-        },
+        data=form,
         timeout=900,
     )
     predict_response.raise_for_status()
@@ -470,6 +476,18 @@ def run_lgt_net(
     placements = predict_data.get("placements")
     placement_success = int(predict_data.get("placement_success") or 0)
     placement_failure = int(predict_data.get("placement_failure") or 0)
+
+    layout_path = None
+    if coordinates is not None:
+        layout_path = os.path.join(root_dir, f"{job_id}_layout.json")
+        with open(layout_path, "w", encoding="utf-8") as f:
+            json.dump(coordinates, f, indent=2)
+        cam_h = coordinates.get("cameraHeight")
+        layout_h = coordinates.get("layoutHeight")
+        print(
+            f"  [LGT] layout -> {os.path.abspath(layout_path)} "
+            f"(cameraHeight={cam_h}, layoutHeight={layout_h})"
+        )
 
     placements_path = None
     if placements is not None:
@@ -515,6 +533,7 @@ def run_lgt_net(
         "placements_path": placements_path,
         "mesh_path": mesh_path,
         "point_cloud_path": point_cloud_path,
+        "layout_path": layout_path,
     }
 
 
@@ -693,13 +712,42 @@ def run_pipeline_from_config(config: dict) -> dict:
         f"failure={lgt_net_result.get('placement_failure', 0)})"
     )
 
-    # Hybrid pose: LGT translation + SAM3D upright/yaw when metadata exists.
+    # Hybrid pose: LGT translation + SAM3D upright/yaw + SAM3D native height.
     metadata_path = os.path.join(object_dir, "metadata.json")
-    if os.path.isfile(metadata_path) and lgt_net_result.get("placements"):
-        merged = merge_sam3d_orientations_into_placements(
-            lgt_net_result["placements"], metadata_path
+    has_meta = os.path.isfile(metadata_path)
+    placements = lgt_net_result.get("placements")
+    if placements:
+        if has_meta:
+            placements = merge_sam3d_orientations_into_placements(
+                placements, metadata_path
+            )
+        placements = merge_sam3d_scale_into_placements(
+            placements,
+            furniture_dir=object_dir,
+            metadata=metadata_path if has_meta else None,
+            mask_dir=mask_dir,
+            layout=lgt_net_result.get("coordinates"),
+            boxes=dino_result.get("boxes"),
         )
-        lgt_net_result = {**lgt_net_result, "placements": merged}
+        scaled = [
+            p for p in placements
+            if (p.get("scale") or {}).get("method") in {
+                "class_typical",
+                "class_typical_footprint",
+            }
+        ]
+        if scaled:
+            mean_f = float(np.mean([float(p["scale"]["factor"]) for p in scaled]))
+            n_clip = sum(
+                1
+                for p in scaled
+                if p["scale"]["method"] == "class_typical_footprint"
+            )
+            print(
+                f"    [SCALE] class-typical height on {len(scaled)}/{len(placements)} "
+                f"(mean factor={mean_f:.3f}, footprint-clipped={n_clip})"
+            )
+        lgt_net_result = {**lgt_net_result, "placements": placements}
 
     # Plan A + B + C quality: label/surface, layout geometry, inter-object clip.
     # QC rejects are folded into record['error'] and placement_success/failure.
@@ -765,6 +813,7 @@ def run_pipeline_from_config(config: dict) -> dict:
                         if os.path.isfile(metadata_path)
                         else "lgt"
                     ),
+                    "scale_source": "class_typical",
                 },
                 f,
                 indent=2,
@@ -789,6 +838,7 @@ def run_pipeline_from_config(config: dict) -> dict:
             show_coordinate_frame=bool(viz_cfg.get("show_coordinate_frame", True)),
             room_transparency=float(viz_cfg.get("room_transparency", 0.4)),
             save_screenshot=viz_cfg.get("save_screenshot"),
+            screenshot_zoom=float(viz_cfg.get("screenshot_zoom", 1.0)),
             skip_rejected=bool(viz_cfg.get("skip_rejected", True)),
             verbose=bool(viz_cfg.get("verbose", True)),
         )
@@ -817,6 +867,7 @@ def visualize_placed_furniture(
     show_coordinate_frame: bool = True,
     room_transparency: float = 0.4,
     save_screenshot: Optional[str] = None,
+    screenshot_zoom: float = 1.0,
     snap_to_floor: bool = True,
     skip_rejected: bool = True,
     verbose: bool = True,
@@ -851,6 +902,7 @@ def visualize_placed_furniture(
         show_coordinate_frame: Draw RGB axes.
         room_transparency: Room wall opacity blend in ``[0, 1]``.
         save_screenshot: Optional path to capture a still after display setup.
+        screenshot_zoom: Multiplier on default capture zoom; smaller is farther.
         snap_to_floor: Snap freestanding AABB bottoms to the floor after pose.
         skip_rejected: Skip placements rejected by quality control.
         verbose: Print load / placement progress.
@@ -886,8 +938,39 @@ def visualize_placed_furniture(
 
     geometries: List = []
 
+    layout = lgt_net_result.get("coordinates")
+    if not layout and lgt_net_result.get("layout_path"):
+        layout_path = lgt_net_result["layout_path"]
+        if os.path.isfile(layout_path):
+            with open(layout_path, encoding="utf-8") as f:
+                layout = json.load(f)
+
+    try:
+        placements = merge_sam3d_scale_into_placements(
+            placements,
+            furniture_dir=furniture_dir,
+            metadata=sam3d_meta,
+            layout=layout,
+        )
+    except Exception as exc:
+        if verbose:
+            print(f"  [VIZ] SAM3D scale unused ({exc})")
+
     room_mesh = None
-    if room_path:
+    if layout:
+        try:
+            room_mesh, edges = layout_json_to_hull(layout)
+            if room_transparency < 1.0:
+                set_room_transparency(room_mesh, alpha=max(room_transparency, 0.35))
+            geometries.append(room_mesh)
+            geometries.append(edges)
+            if verbose:
+                print("  [VIZ] layout hull from LGT JSON (exterior walls)")
+        except Exception as exc:
+            if verbose:
+                print(f"  [VIZ] layout hull unused ({exc})")
+            room_mesh = None
+    if room_mesh is None and room_path:
         if verbose:
             print(f"\n  [VIZ] loading layout mesh: {os.path.abspath(room_path)}")
         room_mesh = load_room_mesh(room_path, verbose=verbose)
@@ -942,26 +1025,19 @@ def visualize_placed_furniture(
         scale_method = scale_info.get("method") or "sam3d"
 
         # Pose-time scale may use an assumed native height when SAM3D is
-        # missing. Recompute from the local GLB AABB + stored H_target / α, R
-        # so the mesh matches the mask without double-applying that prior.
-        alpha = scale_info.get("angular_height")
-        range_m = scale_info.get("range_m")
-        h_target = scale_info.get("target_height")
+        # missing. Recompute from the local GLB AABB + class-typical height
+        # only when the placement has no factor yet.
         try:
             extents = mesh.get_axis_aligned_bounding_box().get_extent()
             h_mesh = float(extents[1])
-            if h_mesh > 1e-4:
-                if (
-                    h_target is None
-                    and alpha is not None
-                    and range_m is not None
-                    and float(alpha) > 1e-3
-                    and float(range_m) > 1e-3
-                ):
-                    h_target = height_from_angular_size(float(alpha), float(range_m))
+            existing_factor = scale_info.get("factor")
+            if h_mesh > 1e-4 and existing_factor is None:
+                from reposition.quality_control import typical_height_for_label
+
+                h_target = typical_height_for_label(placement.get("label"))
                 if h_target is not None and float(h_target) > 1e-4:
                     scale_factor = float(np.clip(float(h_target) / h_mesh, 0.2, 3.0))
-                    scale_method = "room_distance"
+                    scale_method = "class_typical"
                     scale_info = {
                         **scale_info,
                         "factor": scale_factor,
@@ -1022,10 +1098,23 @@ def visualize_placed_furniture(
         print("  [VIZ] nothing to visualize")
         return None
 
-    if show_ground_grid:
-        geometries.extend(create_ground_grid())
     if show_coordinate_frame:
-        geometries.append(create_coordinate_frame(size=1.0))
+        geometries.append(create_coordinate_frame(size=0.35))
+
+    screenshot_geoms = list(geometries)
+
+    if show_ground_grid:
+        origin = np.zeros(3, dtype=np.float64)
+        size = 6.0
+        if room_mesh is not None:
+            box = room_mesh.get_axis_aligned_bounding_box()
+            lo = np.asarray(box.min_bound, dtype=np.float64)
+            hi = np.asarray(box.max_bound, dtype=np.float64)
+            origin = np.array(
+                [0.5 * (lo[0] + hi[0]), float(lo[1]), 0.5 * (lo[2] + hi[2])]
+            )
+            size = float(max(hi[0] - lo[0], hi[2] - lo[2], 2.0) * 1.4)
+        geometries.extend(create_ground_grid(size=size, origin=origin))
 
     if verbose:
         print(
@@ -1041,22 +1130,30 @@ def visualize_placed_furniture(
             height=720,
             left=50,
             top=50,
+            mesh_show_back_face=True,
         )
 
     if save_screenshot:
-        out_dir = os.path.dirname(os.path.abspath(save_screenshot))
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(visible=False, width=1280, height=720)
-        for g in geometries:
-            vis.add_geometry(g)
-        vis.poll_events()
-        vis.update_renderer()
-        vis.capture_screen_image(save_screenshot)
-        vis.destroy_window()
-        if verbose:
-            print(f"  [VIZ] screenshot -> {os.path.abspath(save_screenshot)}")
+        capture_fitted_screenshots(
+            screenshot_geoms,
+            save_screenshot,
+            padding=1.22,
+            verbose=verbose,
+        )
+        if layout:
+            dest = save_screenshot
+            if os.path.splitext(dest)[1].lower() in {".png", ".jpg", ".jpeg"}:
+                dest = os.path.dirname(os.path.abspath(dest))
+            elif os.path.basename(os.path.abspath(dest)).lower() == "screenshots":
+                dest = os.path.dirname(os.path.abspath(dest))
+            fp_path = os.path.join(dest, "floorplan.png")
+            try:
+                save_layout_floorplan(layout, fp_path)
+                if verbose:
+                    print(f"  [VIZ] floorplan -> {os.path.abspath(fp_path)}")
+            except Exception as exc:
+                if verbose:
+                    print(f"  [VIZ] floorplan unused ({exc})")
 
     return geometries
 
