@@ -366,7 +366,22 @@ class TestMergeSam3DOrientationsIntoPlacements(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestMergeSam3DScaleIntoPlacements(unittest.TestCase):
-    def test_factor_from_class_typical_height(self):
+    def test_preserves_detection_id_when_placement_failed(self):
+        boxes = {
+            "detections": [{
+                "detection_id": "dino-job:0000",
+                "label": "sofa",
+                "score": 0.9,
+                "box": {"xMin": 0, "yMin": 0, "xMax": 10, "yMax": 10},
+            }]
+        }
+        merged = merge_sam3d_scale_into_placements(
+            [{"mask": "mask_0.png", "translation": None}], boxes=boxes
+        )
+        self.assertEqual(merged[0]["detection_id"], "dino-job:0000")
+        self.assertEqual(merged[0]["label"], "sofa")
+
+    def test_factor_from_metric_size_prior(self):
         placements = [
             {
                 "mask": "mask_0.png",
@@ -387,11 +402,12 @@ class TestMergeSam3DScaleIntoPlacements(unittest.TestCase):
             placements, metadata=metadata
         )
         scale = merged[0]["scale"]
-        self.assertEqual(scale["method"], "class_typical")
-        self.assertAlmostEqual(scale["typical_height"], 0.85)
+        self.assertEqual(scale["method"], "size_prior")
+        self.assertEqual(scale["prior_category"], "diningchair")
         self.assertAlmostEqual(scale["object_height"], 2.0)
-        self.assertAlmostEqual(scale["factor"], 0.85 / 2.0)
-        self.assertAlmostEqual(scale["target_height"], 0.85)
+        self.assertAlmostEqual(scale["target_height"], scale["target_dimensions"][2])
+        self.assertGreater(scale["target_height"], 0.4)
+        self.assertLess(scale["target_height"], 1.0)
         np.testing.assert_allclose(merged[0]["translation"], [1.0, 1.6, 2.0])
 
     def test_clips_factor(self):
@@ -461,10 +477,8 @@ class TestMergeSam3DScaleIntoPlacements(unittest.TestCase):
         )
         self.assertAlmostEqual(merged[0]["scale"]["object_height"], 0.55)
         self.assertNotAlmostEqual(merged[0]["scale"]["factor"], 0.55)
-        self.assertAlmostEqual(
-            merged[0]["scale"]["factor"],
-            float(np.clip(0.75 / 0.55, 0.2, 3.0)),
-        )
+        self.assertEqual(merged[0]["scale"]["method"], "size_prior")
+        self.assertEqual(merged[0]["scale"]["prior_category"], "table")
 
     def test_recovers_alpha_from_mask_file_as_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -498,7 +512,7 @@ class TestMergeSam3DScaleIntoPlacements(unittest.TestCase):
         })
         self.assertNotIn("factor", merged[0].get("scale") or {})
 
-    def test_footprint_clip_shrinks_oversized_xz(self):
+    def test_room_fit_never_shrinks_prior_scale(self):
         camera_height = 1.6
         half = 0.40
         layout = {
@@ -527,11 +541,37 @@ class TestMergeSam3DScaleIntoPlacements(unittest.TestCase):
             placements, metadata=metadata, layout=layout
         )
         scale = merged[0]["scale"]
-        self.assertEqual(scale["method"], "class_typical_footprint")
-        self.assertLess(scale["factor"], 1.0)
+        self.assertEqual(scale["method"], "size_prior")
+        expected = merge_sam3d_scale_into_placements(
+            placements, metadata=metadata, layout=None
+        )[0]["scale"]["factor"]
+        self.assertAlmostEqual(scale["factor"], expected)
         self.assertGreaterEqual(scale["factor"], 0.2)
-        half_xz = 0.5 * scale["factor"] * scale["native_xz"]
-        self.assertLessEqual(half_xz, half + 1e-3)
+
+    def test_scale_is_independent_of_translation(self):
+        placements = [
+            {"mask": "mask_0.png", "translation": [0, 1.6, 1], "label": "couch"},
+            {"mask": "mask_1.png", "translation": [0, 1.6, 5], "label": "couch"},
+        ]
+        merged = merge_sam3d_scale_into_placements(
+            placements, metadata={0: {"scale": 1.0}, 1: {"scale": 1.0}}
+        )
+        self.assertAlmostEqual(
+            merged[0]["scale"]["factor"], merged[1]["scale"]["factor"]
+        )
+
+    def test_scene_factor_limits_outliers(self):
+        placements = [
+            {"mask": f"mask_{i}.png", "translation": [i, 1.6, 1], "label": "couch"}
+            for i in range(3)
+        ]
+        merged = merge_sam3d_scale_into_placements(
+            placements,
+            metadata={0: {"scale": 0.1}, 1: {"scale": 1.0}, 2: {"scale": 1.0}},
+        )
+        factors = [item["scale"]["factor"] for item in merged]
+        self.assertLessEqual(max(factors) / min(factors), 1.25 / 0.8 + 1e-6)
+        self.assertTrue(all(item["scale"]["scene_factor"] for item in merged))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

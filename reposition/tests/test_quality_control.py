@@ -24,6 +24,7 @@ from reposition.quality_control import (
     label_map_from_dino_boxes,
     mark_quality_rejections,
     normalize_dino_label,
+    quality_check_message,
     typical_height_for_label,
 )
 
@@ -33,6 +34,7 @@ def _boxes(*items: tuple[str, float]) -> dict:
     for i, (label, score) in enumerate(items):
         detections.append(
             {
+                "detection_id": f"det-{i}",
                 "label": label,
                 "score": score,
                 "box": {
@@ -106,13 +108,13 @@ class TestNormalizeDinoLabel(unittest.TestCase):
 
 class TestTypicalHeightForLabel(unittest.TestCase):
     def test_known_classes(self):
-        self.assertAlmostEqual(typical_height_for_label("chair"), 0.85)
-        self.assertAlmostEqual(typical_height_for_label("table"), 0.75)
-        self.assertAlmostEqual(typical_height_for_label("bed"), 0.55)
-        self.assertAlmostEqual(typical_height_for_label("sofa"), 0.85)
+        self.assertAlmostEqual(typical_height_for_label("chair"), 0.866, places=2)
+        self.assertAlmostEqual(typical_height_for_label("table"), 0.747, places=2)
+        self.assertAlmostEqual(typical_height_for_label("bed"), 0.55, places=2)
+        self.assertAlmostEqual(typical_height_for_label("sofa"), 0.762, places=2)
 
     def test_concatenated_dino_tokens(self):
-        self.assertAlmostEqual(typical_height_for_label("sofachairbed"), 0.85)
+        self.assertAlmostEqual(typical_height_for_label("sofachairbed"), 0.866, places=2)
         self.assertAlmostEqual(typical_height_for_label("cabinetshelf"), 0.90)
 
     def test_unknown_uses_default(self):
@@ -176,9 +178,11 @@ class TestApplySurfaceClassQuality(unittest.TestCase):
         self.assertEqual(out[0]["label"], "door")
         self.assertFalse(out[0]["quality"]["keep"])
         self.assertIn("surface_class", out[0]["quality"]["fails"])
+        self.assertEqual(out[0]["quality"]["message"], "Item on wrong surface")
 
         self.assertEqual(out[1]["label"], "chair")
         self.assertTrue(out[1]["quality"]["keep"])
+        self.assertEqual(out[1]["quality"]["message"], "")
 
         self.assertEqual(out[2]["label"], "painting")
         self.assertTrue(out[2]["quality"]["keep"])
@@ -202,6 +206,7 @@ class TestApplySurfaceClassQuality(unittest.TestCase):
         label_map = label_map_from_dino_boxes(boxes, min_score=0.5)
         self.assertEqual(set(label_map.keys()), {0})
         self.assertEqual(label_map[0]["label"], "shelf")
+        self.assertEqual(label_map[0]["detection_id"], "det-1")
 
         placements = [{"mask": "mask_0.png", "surface": "floor"}]
         out = apply_surface_class_quality(
@@ -352,8 +357,10 @@ class TestPlanBGeometry(unittest.TestCase):
         self.assertTrue(out[0]["quality"]["keep"])
         self.assertFalse(out[1]["quality"]["keep"])
         self.assertIn("inside_footprint", out[1]["quality"]["fails"])
+        self.assertEqual(out[1]["quality"]["message"], "Item is too big")
         self.assertFalse(out[2]["quality"]["keep"])
         self.assertIn("wall_attachment", out[2]["quality"]["fails"])
+        self.assertEqual(out[2]["quality"]["message"], "Item is too big")
 
     def test_apply_placement_quality_combines_a_and_b(self):
         boxes = _boxes(("door", 0.9), ("chair", 0.8))
@@ -376,7 +383,9 @@ class TestPlanBGeometry(unittest.TestCase):
         )
         self.assertFalse(out[0]["quality"]["keep"])
         self.assertIn("surface_class", out[0]["quality"]["fails"])
+        self.assertEqual(out[0]["quality"]["message"], "Item on wrong surface")
         self.assertTrue(out[1]["quality"]["keep"])
+        self.assertEqual(out[1]["quality"]["message"], "")
         self.assertIn("inside_footprint", out[1]["quality"]["checks"])
         self.assertIn("wall_penetration", out[1]["quality"]["checks"])
         self.assertIn("height_band", out[1]["quality"]["checks"])
@@ -423,6 +432,7 @@ class TestPlanCClipping(unittest.TestCase):
         self.assertFalse(out[1]["quality"]["keep"])
         self.assertIn("inter_object_clip", out[0]["quality"]["fails"])
         self.assertIn("inter_object_clip", out[1]["quality"]["fails"])
+        self.assertEqual(out[0]["quality"]["message"], "Item clipped into another object")
         self.assertEqual(out[0]["quality"]["checks"]["inter_object_clip"]["overlaps"][0]["mask"], "mask_1.png")
 
     def test_light_overlap_passes_default_thresh(self):
@@ -563,10 +573,31 @@ class TestMarkQualityRejections(unittest.TestCase):
         out, success, failure = mark_quality_rejections(placements)
         self.assertEqual(success, 1)
         self.assertEqual(failure, 2)
-        self.assertTrue(out[0]["error"].startswith("quality:"))
-        self.assertIn("surface_class", out[0]["error"])
+        self.assertEqual(out[0]["error"], "Item on wrong surface")
+        self.assertEqual(out[0]["quality"]["message"], "Item on wrong surface")
+        self.assertEqual(out[1]["quality"]["message"], "")
         self.assertNotIn("error", out[1])
         self.assertEqual(out[2]["error"], "unresolved: translation, scale")
+
+
+class TestQualityCheckMessage(unittest.TestCase):
+    def test_pass_is_empty(self):
+        self.assertEqual(quality_check_message([]), "")
+        self.assertEqual(quality_check_message(None), "")
+
+    def test_plan_priority(self):
+        self.assertEqual(quality_check_message(["surface_class"]), "Item on wrong surface")
+        self.assertEqual(quality_check_message(["inside_footprint"]), "Item is too big")
+        self.assertEqual(quality_check_message(["wall_penetration"]), "Item is too big")
+        self.assertEqual(quality_check_message(["height_band"]), "Item is too big")
+        self.assertEqual(
+            quality_check_message(["inter_object_clip"]),
+            "Item clipped into another object",
+        )
+        self.assertEqual(
+            quality_check_message(["inter_object_clip", "surface_class"]),
+            "Item on wrong surface",
+        )
 
 
 if __name__ == "__main__":

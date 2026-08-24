@@ -43,6 +43,7 @@ COPY utils /app/utils
 COPY visualization /app/visualization
 COPY src/config /app/src/config
 COPY reposition /app/reposition
+COPY scale_metrics /app/scale_metrics
 
 # explicitly create output and checkpoint dirs
 # Weights are NOT baked into the image — mount ./checkpoints:/app/checkpoints at runtime.

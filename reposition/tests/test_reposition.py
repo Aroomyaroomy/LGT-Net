@@ -689,8 +689,11 @@ class TestPlacementsFromMaskDir(unittest.TestCase):
             self.assertEqual(success, 0)
             self.assertEqual(failure, 1)
             err = results[0].get("error") or ""
-            self.assertTrue(err.startswith("quality:"), err)
-            self.assertIn("surface_class", err)
+            self.assertEqual(err, "Item on wrong surface")
+            self.assertEqual(
+                (results[0].get("quality") or {}).get("message"),
+                "Item on wrong surface",
+            )
 
     def test_with_sam3d_metadata_dict(self):
         self._create_mask("mask_0.png", u_center=512, v_center=280)

@@ -65,6 +65,7 @@ from .quality_control import (
     mark_quality_rejections,
     normalize_dino_label,
     placement_half_extents,
+    quality_check_message,
     quality_rejection_error,
     typical_height_for_label,
 )
@@ -84,10 +85,19 @@ from .sam_utils import (
     uprightness,
     uprightness_metrics,
 )
+from .size_priors import (
+    ALIASES,
+    ROOM_CATEGORIES,
+    prompt_for_room,
+    scale_from_prior,
+    size_prior,
+)
 
 __all__ = [
     "JSON_TO_OBJ3D",
     "OBJ3D_UP",
+    "ALIASES",
+    "ROOM_CATEGORIES",
     "SAM3D_UP",
     "azimuth_unit_xz",
     "check_floor_hit",
@@ -139,6 +149,8 @@ __all__ = [
     "placement_to_obj3d_frame",
     "placements_from_mask_dir",
     "point_in_floor_polygon",
+    "prompt_for_room",
+    "quality_check_message",
     "quality_rejection_error",
     "quat_xyzw_to_rotation_matrix",
     "range_from_angular_size",
@@ -150,10 +162,12 @@ __all__ = [
     "rotation_about_axis",
     "rotation_matrix_yaw",
     "sam3d_orientation_to_obj3d",
+    "scale_from_prior",
     "shrink_range_into_footprint",
     "signed_angle_about_axis",
     "solve_t",
     "solve_t_plane",
+    "size_prior",
     "to_json_frame",
     "typical_height_for_label",
     "uprightness",

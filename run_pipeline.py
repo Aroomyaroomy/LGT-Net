@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import numpy as np
@@ -29,6 +30,7 @@ from get_pano_masks import (
 from gen_furniture_3d import wait_and_fetch_3d_job, submit_3d_job
 from reposition import (
     apply_placement_quality,
+    detections_aligned_to_masks,
     json_frame_to_obj3d,
     json_rotation_to_obj3d,
     load_sam3d_metadata,
@@ -36,6 +38,10 @@ from reposition import (
     merge_sam3d_orientations_into_placements,
     merge_sam3d_scale_into_placements,
     placement_to_obj3d_frame,
+    prompt_for_room,
+    quality_check_message,
+    scale_from_prior,
+    size_prior,
     uprightness_metrics,
 )
 from visualization.compare_layout_furniture import (
@@ -244,11 +250,14 @@ def run_dino(
 
     boxes_url = predict_data.get("boxes_url") or f"/jobs/{job_id}/boxes"
     boxes = fetch_boxes_json(boxes_url, service_url, api_key)
+    for i, detection in enumerate(boxes.get("detections") or []):
+        detection["detection_id"] = f"{job_id}:{i:04d}"
 
     boxes_path = None
     if download_boxes:
         boxes_path = os.path.join(root_dir, f"{job_id}_boxes.json")
-        download_binary(f"{service_url}{boxes_url}", boxes_path, headers=headers)
+        with open(boxes_path, "w", encoding="utf-8") as f:
+            json.dump(boxes, f, indent=2)
         print(f"  [DINO] boxes -> {os.path.abspath(boxes_path)}")
 
     visualization_path = None
@@ -433,6 +442,8 @@ def run_lgt_net(
     output_point_cloud: bool = False,
     mask_dir: Optional[str] = None,
     mesh_format: str = ".obj",
+    room_height: Optional[float] = None,
+    room_type: str = "living_room",
 ) -> dict:
     """Call LGT-Net /predict; optionally upload local mask_*.png for placements."""
     service_url = service_url.rstrip("/")
@@ -454,7 +465,10 @@ def run_lgt_net(
         "pre_processing": str(pre_processing).lower(),
         "output_mesh": str(output_mesh).lower(),
         "output_point_cloud": str(output_point_cloud).lower(),
+        "room_type": room_type,
     }
+    if room_height is not None:
+        form["room_height"] = str(room_height)
 
     predict_response = requests.post(
         f"{service_url}/predict",
@@ -590,6 +604,82 @@ def _mesh_path_for_mask(furniture_dir: str, mask_name: str) -> Optional[str]:
     return None
 
 
+def _placement_obj3d_matrix(placement: dict) -> Optional[np.ndarray]:
+    """4×4 pose in the obj3d frame from translation / rotation / scale, or None."""
+    translation = placement.get("translation")
+    if translation is None:
+        return None
+    rotation = placement.get("rotation") or {}
+    matrix = rotation.get("matrix") if isinstance(rotation, dict) else None
+    R = np.asarray(matrix, dtype=float) if matrix is not None else None
+    if R is not None and rotation.get("frame") != "obj3d":
+        _, R = placement_to_obj3d_frame(np.zeros(3), R)
+    transform = np.eye(4)
+    transform[:3, :3] = (np.eye(3) if R is None else R) * float(
+        (placement.get("scale") or {}).get("factor", 1.0)
+    )
+    transform[:3, 3] = json_frame_to_obj3d(np.asarray(translation, dtype=float))
+    return transform
+
+
+def export_placed_furniture_assets(
+    placements: List[dict],
+    furniture_dir: str,
+    output_dir: str,
+    mask_dir: Optional[str] = None,
+) -> List[dict]:
+    """Export QC-approved meshes with final scale, rotation, and translation."""
+    import trimesh
+
+    shutil.rmtree(output_dir, ignore_errors=True)
+    os.makedirs(output_dir, exist_ok=True)
+    assets = []
+    for i, placement in enumerate(placements or []):
+        mask = placement.get("mask") or f"mask_{i}.png"
+        detection_id = placement.get("detection_id") or f"detection_{i:04d}"
+        source = _mesh_path_for_mask(furniture_dir, mask)
+        accepted = bool(
+            source and placement.get("translation") is not None
+            and not placement.get("error")
+            and (placement.get("quality") or {}).get("keep", True)
+        )
+        quality = placement.get("quality") or {}
+        transform = _placement_obj3d_matrix(placement)
+        asset = {
+            "detection_id": detection_id,
+            "mask_index": placement.get("mask_index", i),
+            "mask": os.path.abspath(os.path.join(mask_dir, mask)) if mask_dir else mask,
+            "label": placement.get("label"),
+            "raw_label": (placement.get("dino") or {}).get("raw_label"),
+            "score": (placement.get("dino") or {}).get("score"),
+            "accepted": accepted,
+            "sam3d_mesh": os.path.abspath(source) if source else None,
+            "posed_mesh": None,
+            "surface": placement.get("surface"),
+            "translation": placement.get("translation"),
+            "rotation": placement.get("rotation"),
+            "scale": placement.get("scale"),
+            "matrix": None if transform is None else transform.tolist(),
+            "quality": quality,
+            "quality_message": quality.get("message", quality_check_message(quality.get("fails"))),
+            "error": placement.get("error"),
+        }
+        if accepted and transform is not None:
+            scene = trimesh.load_scene(source, process=False)
+            scene.apply_transform(transform)
+            if placement.get("surface") != "wall":
+                floor_shift = np.eye(4)
+                floor_shift[1, 3] = float(transform[1, 3] - scene.bounds[0, 1])
+                scene.apply_transform(floor_shift)
+            safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", detection_id)
+            posed_path = os.path.abspath(os.path.join(output_dir, f"{safe_id}.glb"))
+            scene.export(posed_path, file_type="glb")
+            asset["posed_mesh"] = posed_path
+            asset["translation_obj3d"] = transform[:3, 3].tolist()
+        assets.append(asset)
+    return assets
+
+
 def load_pipeline_config(config_path: str) -> dict:
     """
     Load pipeline hyperparameters from a JSON file.
@@ -619,6 +709,7 @@ def run_pipeline_from_config(config: dict) -> dict:
 
     root_dir = config.get("root_dir") or "."
     api_key = config.get("api_key")
+    room_type = config.get("room_type", "living_room")
     dino_cfg = config.get("dino") or {}
     sam_cfg = config.get("sam") or {}
     sam3d_cfg = config.get("sam3d") or {}
@@ -632,10 +723,7 @@ def run_pipeline_from_config(config: dict) -> dict:
         image_url=image_url,
         root_dir=root_dir,
         service_url=dino_cfg.get("service_url", "http://localhost:8001"),
-        text_prompt=dino_cfg.get(
-            "text_prompt",
-            "sofa. chair. table. cabinet. utensils.",
-        ),
+        text_prompt=dino_cfg.get("text_prompt") or prompt_for_room(room_type),
         api_key=dino_cfg.get("api_key", api_key),
         box_threshold=float(dino_cfg.get("box_threshold", 0.3)),
         text_threshold=float(dino_cfg.get("text_threshold", 0.25)),
@@ -645,6 +733,7 @@ def run_pipeline_from_config(config: dict) -> dict:
     )
 
     mask_dir = os.path.join(root_dir, "masks")
+    shutil.rmtree(mask_dir, ignore_errors=True)
     sam_result = run_sam(
         image_url=image_url,
         boxes=dino_result["boxes"],
@@ -655,14 +744,24 @@ def run_pipeline_from_config(config: dict) -> dict:
         poll_interval=int(sam_cfg.get("poll_interval", DEFAULT_POLL_INTERVAL)),
         poll_max_attempts=int(sam_cfg.get("poll_max_attempts", DEFAULT_POLL_MAX_ATTEMPTS)),
     )
+    aligned_detections = detections_aligned_to_masks(
+        dino_result["boxes"], min_score=sam_cfg.get("min_score")
+    )
+    masks = sam_result.get("data", {}).get("masks", [])
+    for i, mask in enumerate(masks):
+        if i < len(aligned_detections):
+            mask["detection_id"] = aligned_detections[i]["detection_id"]
+        mask["mask_index"] = i
+        mask["mask_name"] = f"mask_{i}.png"
     print(f"  [SAM] masks saved under {os.path.abspath(mask_dir)}")
     print(
         f"  [SAM] request complete: "
         f"{len(sam_result.get('data', {}).get('masks', []))} mask(s)"
     )
 
-    mask_urls = [mask["url"] for mask in sam_result.get("data", {}).get("masks", [])]
+    mask_urls = [mask["url"] for mask in masks]
     object_dir = os.path.join(root_dir, "objects")
+    shutil.rmtree(object_dir, ignore_errors=True)
     sam3d_result = run_sam3d(
         image_url=image_url,
         mask_urls=mask_urls,
@@ -704,6 +803,8 @@ def run_pipeline_from_config(config: dict) -> dict:
         output_point_cloud=bool(lgt_cfg.get("output_point_cloud", False)),
         mask_dir=mask_dir if upload_masks else None,
         mesh_format=lgt_cfg.get("mesh_format", ".obj"),
+        room_height=lgt_cfg.get("room_height"),
+        room_type=room_type,
     )
     print(
         f"    [LGT-Net] request complete: {lgt_net_result.get('job_id')} "
@@ -728,12 +829,14 @@ def run_pipeline_from_config(config: dict) -> dict:
             mask_dir=mask_dir,
             layout=lgt_net_result.get("coordinates"),
             boxes=dino_result.get("boxes"),
+            min_score=sam_cfg.get("min_score"),
         )
         scaled = [
             p for p in placements
             if (p.get("scale") or {}).get("method") in {
+                "size_prior",
+                "size_prior_moved",
                 "class_typical",
-                "class_typical_footprint",
             }
         ]
         if scaled:
@@ -741,11 +844,11 @@ def run_pipeline_from_config(config: dict) -> dict:
             n_clip = sum(
                 1
                 for p in scaled
-                if p["scale"]["method"] == "class_typical_footprint"
+                if p["scale"]["method"] == "size_prior_moved"
             )
             print(
-                f"    [SCALE] class-typical height on {len(scaled)}/{len(placements)} "
-                f"(mean factor={mean_f:.3f}, footprint-clipped={n_clip})"
+                f"    [SCALE] metric priors on {len(scaled)}/{len(placements)} "
+                f"(mean factor={mean_f:.3f}, moved-inward={n_clip})"
             )
         lgt_net_result = {**lgt_net_result, "placements": placements}
 
@@ -813,7 +916,7 @@ def run_pipeline_from_config(config: dict) -> dict:
                         if os.path.isfile(metadata_path)
                         else "lgt"
                     ),
-                    "scale_source": "class_typical",
+                    "scale_source": "metric_size_prior",
                 },
                 f,
                 indent=2,
@@ -827,6 +930,68 @@ def run_pipeline_from_config(config: dict) -> dict:
             f"    [LGT-Net] uprightness: n={len(uprightness_report)} "
             f"mean_cos={mean_cos:.4f}"
         )
+
+    posed_dir = os.path.join(root_dir, "posed_objects")
+    assets = export_placed_furniture_assets(
+        lgt_net_result.get("placements") or [],
+        furniture_dir=object_dir,
+        output_dir=posed_dir,
+        mask_dir=mask_dir,
+    )
+    assets_by_id = {asset["detection_id"]: asset for asset in assets}
+    detections = []
+    for i, detection in enumerate(aligned_detections):
+        detection_id = detection["detection_id"]
+        asset = assets_by_id.get(detection_id, {})
+        mask = masks[i] if i < len(masks) else {}
+        detections.append({
+            "detection_id": detection_id,
+            "detection_index": next(
+                (j for j, row in enumerate(dino_result["boxes"].get("detections", []))
+                 if row.get("detection_id") == detection_id),
+                i,
+            ),
+            "mask_index": i,
+            "label": detection.get("label"),
+            "score": detection.get("score"),
+            "box": detection.get("box"),
+            "mask_url": mask.get("url"),
+            "mask": os.path.abspath(os.path.join(mask_dir, f"mask_{i}.png")),
+            "sam3d_mesh": asset.get("sam3d_mesh"),
+            "posed_mesh": asset.get("posed_mesh"),
+            "accepted": asset.get("accepted", False),
+            "matrix": asset.get("matrix"),
+            "quality_message": asset.get("quality_message", ""),
+        })
+    manifest = {
+        "schema_version": 1,
+        "pipeline_job_id": lgt_net_result.get("job_id"),
+        "room_type": room_type,
+        "room": {
+            "layout_json": (
+                os.path.abspath(lgt_net_result["layout_path"])
+                if lgt_net_result.get("layout_path") else None
+            ),
+            "layout_mesh": (
+                os.path.abspath(lgt_net_result["mesh_path"])
+                if lgt_net_result.get("mesh_path") else None
+            ),
+            "height_m": (lgt_net_result.get("coordinates") or {}).get("layoutHeight"),
+        },
+        "sam3d": {
+            "metadata": os.path.abspath(metadata_path) if has_meta else None,
+            "combined_mesh": (
+                os.path.abspath(os.path.join(object_dir, "combined_scene.glb"))
+                if os.path.isfile(os.path.join(object_dir, "combined_scene.glb")) else None
+            ),
+        },
+        "detections": detections,
+        "objects": assets,
+    }
+    manifest_path = os.path.abspath(os.path.join(root_dir, "assets_manifest.json"))
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"    [ASSETS] manifest -> {manifest_path}")
 
     viz_geometries = None
     if bool(viz_cfg.get("enabled", True)):
@@ -855,6 +1020,8 @@ def run_pipeline_from_config(config: dict) -> dict:
         "placement_failure": lgt_net_result.get("placement_failure", 0),
         "quality_rejected": quality_rejected,
         "uprightness": uprightness_report,
+        "assets": manifest,
+        "assets_manifest_path": manifest_path,
         "visualize": viz_geometries,
     }
 
@@ -1024,26 +1191,24 @@ def visualize_placed_furniture(
         scale_factor = float(scale_info.get("factor", 1.0) or 1.0)
         scale_method = scale_info.get("method") or "sam3d"
 
-        # Pose-time scale may use an assumed native height when SAM3D is
-        # missing. Recompute from the local GLB AABB + class-typical height
-        # only when the placement has no factor yet.
+        # Recover a missing stored factor directly from local mesh dimensions.
         try:
             extents = mesh.get_axis_aligned_bounding_box().get_extent()
             h_mesh = float(extents[1])
             existing_factor = scale_info.get("factor")
             if h_mesh > 1e-4 and existing_factor is None:
-                from reposition.quality_control import typical_height_for_label
-
-                h_target = typical_height_for_label(placement.get("label"))
-                if h_target is not None and float(h_target) > 1e-4:
-                    scale_factor = float(np.clip(float(h_target) / h_mesh, 0.2, 3.0))
-                    scale_method = "class_typical"
+                prior = size_prior(placement.get("label"))
+                if prior:
+                    scale_factor, dimensions = scale_from_prior(extents, prior)
+                    scale_method = "size_prior"
                     scale_info = {
                         **scale_info,
                         "factor": scale_factor,
                         "method": scale_method,
                         "object_height": h_mesh,
-                        "target_height": float(h_target),
+                        "target_height": dimensions[2],
+                        "target_dimensions": dimensions,
+                        "prior_category": prior["category"],
                     }
         except Exception:
             pass

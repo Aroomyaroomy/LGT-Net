@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 
 from .lgt_utils import (
+    JSON_TO_OBJ3D,
     _normalize,
     floor_polygon_from_layout,
     height_from_angular_size,
@@ -13,6 +14,7 @@ from .lgt_utils import (
     mask_angular_height,
     point_in_floor_polygon,
 )
+from .size_priors import scale_from_prior, size_prior
 
 
 # SAM3D scene / create_3d_obj mesh share a Y-up convention (floor at negative Y).
@@ -428,6 +430,35 @@ def clip_scale_factor_to_footprint(
     return float(lo), True
 
 
+def _move_footprint_inside(translation, dimensions, rotation, layout):
+    """Move an oriented W×D footprint toward room centre; never resize it."""
+    if layout is None:
+        return translation, False
+    polygon = floor_polygon_from_layout(layout)
+    poly = np.asarray(polygon, dtype=np.float32).reshape(-1, 2)
+    t = np.asarray(translation, dtype=float)
+    w, d = np.asarray(dimensions, dtype=float)[:2] / 2.0
+    local = np.array([[-w, 0, -d], [-w, 0, d], [w, 0, -d], [w, 0, d]])
+    matrix = (rotation or {}).get("matrix") if isinstance(rotation, dict) else None
+    rotation_matrix = np.asarray(matrix).reshape(3, 3) if matrix is not None else np.eye(3)
+    offsets = local @ rotation_matrix.T
+    if isinstance(rotation, dict) and rotation.get("frame") == "obj3d":
+        offsets = offsets @ JSON_TO_OBJ3D
+
+    def fits(point):
+        return all(cv2.pointPolygonTest(poly, tuple((point + c)[[0, 2]]), False) >= 0 for c in offsets)
+
+    if fits(t):
+        return t.tolist(), False
+    centre = np.mean(poly, axis=0)
+    target = np.array([centre[0], t[1], centre[1]], dtype=float)
+    for amount in np.linspace(0.05, 1.0, 20):
+        candidate = t + amount * (target - t)
+        if fits(candidate):
+            return candidate.tolist(), True
+    return t.tolist(), False
+
+
 def merge_sam3d_scale_into_placements(
     placements: list[dict],
     furniture_dir: Path | str | None = None,
@@ -438,18 +469,13 @@ def merge_sam3d_scale_into_placements(
     layout: dict | None = None,
     boxes=None,
     label_map: dict | None = None,
+    min_score: float | None = None,
 ) -> list[dict]:
     """
-    Scale each mesh from a class-typical height, then clip to the floor polygon.
+    Uniformly scale upright SAM3D dimensions to robust category size priors.
 
-    ``H_target`` is the typical standing height for the DINO label (chair 0.85 m,
-    table 0.75 m, bed 0.55 m, sofa 0.85 m, else 0.80 m). ``factor`` is
-    ``clip(H_target / H_mesh)`` where ``H_mesh`` is the exported GLB Y-extent,
-    else SAM3D metadata scale as a unit-height proxy.
-
-    When ``layout`` is provided, floor objects are then shrunk uniformly until
-    their XZ AABB lies inside the footprint. Photometric α / R are stored only
-    as diagnostics and do not drive size.
+    Size is independent of panorama range. Floor objects are moved inward when
+    needed; they are never made implausibly small merely to fit the room.
     """
     if not placements:
         return placements
@@ -465,40 +491,52 @@ def merge_sam3d_scale_into_placements(
     furn = Path(furniture_dir) if furniture_dir is not None else None
     lo, hi = float(min_scale), float(max_scale)
     if label_map is None and boxes is not None:
-        label_map = label_map_from_dino_boxes(boxes)
+        label_map = label_map_from_dino_boxes(boxes, min_score=min_score)
+
+    estimates = {}
+    for placement in placements:
+        idx = mask_index_from_name(placement.get("mask") or "")
+        info = label_map.get(idx) if label_map and idx is not None else None
+        label = placement.get("label") or (info or {}).get("label")
+        extents = object_aabb_extents_from_sam3d(idx, metadata=meta, furniture_dir=furn) if idx is not None else None
+        prior = size_prior(label)
+        if extents is not None and prior:
+            estimates[idx] = extents, prior, scale_from_prior(extents, prior, (lo, hi))
+    scene_factor = None
+    if len(estimates) >= 3:
+        scene_factor = float(np.exp(np.median(np.log([item[2][0] for item in estimates.values()]))))
 
     merged = []
     for placement in placements:
         record = dict(placement)
-        if record.get("translation") is None:
-            merged.append(record)
-            continue
-
         idx = mask_index_from_name(record.get("mask") or "")
-        if label_map and idx is not None and record.get("label") is None:
+        if label_map and idx is not None:
             info = label_map.get(idx)
             if info:
-                record["label"] = info.get("label")
+                record["detection_id"] = info["detection_id"]
+                record["mask_index"] = info["mask_index"]
+                if record.get("label") is None:
+                    record["label"] = info.get("label")
                 if record.get("dino") is None:
                     record["dino"] = {
+                        "detection_id": info["detection_id"],
                         "label": info.get("label"),
                         "raw_label": info.get("raw_label"),
                         "score": info.get("score"),
                     }
+        if record.get("translation") is None:
+            merged.append(record)
+            continue
 
-        extents = (
+        estimate = estimates.get(idx)
+        extents = estimate[0] if estimate else (
             object_aabb_extents_from_sam3d(idx, metadata=meta, furniture_dir=furn)
-            if idx is not None
-            else None
+            if idx is not None else None
         )
         h_mesh = float(extents[1]) if extents is not None else None
-        native_xz = (
-            float(np.hypot(float(extents[0]), float(extents[2])))
-            if extents is not None
-            else None
-        )
         _, alpha, range_m = _placement_photometric_height(record, mask_dir)
 
+        prior = estimate[1] if estimate else size_prior(record.get("label"))
         typical = typical_height_for_label(record.get("label"))
         if typical is None:
             typical = float(DEFAULT_OBJECT_HEIGHT_M)
@@ -512,25 +550,37 @@ def merge_sam3d_scale_into_placements(
             scale["range_m"] = float(range_m)
         scale["typical_height"] = float(typical)
 
-        if h_mesh is not None and h_target > 1e-4:
+        if extents is not None and prior:
+            factor, dimensions = estimate[2] if estimate else scale_from_prior(extents, prior, (lo, hi))
+            raw_factor = factor
+            if scene_factor is not None:
+                factor = float(np.clip(factor, 0.8 * scene_factor, 1.25 * scene_factor))
+                dimensions = (factor * np.asarray(extents)[[0, 2, 1]]).tolist()
+            moved = False
+            if record.get("surface") != "wall":
+                record["translation"], moved = _move_footprint_inside(
+                    record["translation"], dimensions, record.get("rotation"), layout
+                )
+            scale.update({
+                "object_height": h_mesh,
+                "native_dimensions": np.asarray(extents)[[0, 2, 1]].tolist(),
+                "factor": factor,
+                "factor_unregularized": raw_factor,
+                "scene_factor": scene_factor,
+                "target_dimensions": dimensions,
+                "target_height": dimensions[2],
+                "prior_category": prior["category"],
+                "prior_median": prior["median"],
+                "method": "size_prior_moved" if moved else "size_prior",
+            })
+            record["scale"] = scale
+        elif h_mesh is not None and h_target > 1e-4:
             factor = float(np.clip(h_target / h_mesh, lo, hi))
-            if native_xz is None or native_xz <= 1e-4:
-                native_xz = 2.0 * float(DEFAULT_HALF_XZ_FRAC) * h_mesh
-            clipped_factor, clipped = clip_scale_factor_to_footprint(
-                record["translation"],
-                factor,
-                native_xz,
-                layout,
-                min_scale=lo,
-                surface=record.get("surface"),
-            )
             scale["object_height"] = float(h_mesh)
-            scale["native_xz"] = float(native_xz)
-            scale["factor"] = float(clipped_factor)
-            scale["target_height"] = float(clipped_factor * h_mesh)
-            scale["method"] = (
-                "class_typical_footprint" if clipped else "class_typical"
-            )
+            scale["native_xz"] = 2.0 * float(DEFAULT_HALF_XZ_FRAC) * h_mesh
+            scale["factor"] = factor
+            scale["target_height"] = factor * h_mesh
+            scale["method"] = "class_typical"
             record["scale"] = scale
         elif scale:
             scale["target_height"] = float(h_target)

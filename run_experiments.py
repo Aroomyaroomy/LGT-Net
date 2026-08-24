@@ -30,6 +30,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from run_pipeline import load_pipeline_config, run_pipeline_from_config
+from reposition import prompt_for_room
 
 # ── S3 panorama URLs ──────────────────────────────────────────────
 S3_BASE = (
@@ -41,8 +42,8 @@ S3_BASE = (
 EXPERIMENTS = [
     {
         "name": "kitchen",
+        "room_type": "kitchen",
         "image_url": f"{S3_BASE}/kitchen.jpg",
-        "text_prompt": "cabinet. counter. stove. sink. table. chair. refrigerator.",
         "box_threshold": 0.25,
         "text_threshold": 0.20,
         "min_score": None,
@@ -50,8 +51,8 @@ EXPERIMENTS = [
     },
     {
         "name": "bathroom",
+        "room_type": "bathroom",
         "image_url": f"{S3_BASE}/bathroom.jpg",
-        "text_prompt": "toilet. sink. bathtub. shower. mirror. cabinet.",
         "box_threshold": 0.25,
         "text_threshold": 0.20,
         "min_score": None,
@@ -59,8 +60,8 @@ EXPERIMENTS = [
     },
     {
         "name": "dim_room",
+        "room_type": "bed_room",
         "image_url": f"{S3_BASE}/dim_room.jpg",
-        "text_prompt": "sofa. chair. table. cabinet. lamp. bed.",
         "box_threshold": 0.25,
         "text_threshold": 0.20,
         "min_score": None,
@@ -68,8 +69,8 @@ EXPERIMENTS = [
     },
     {
         "name": "small_square_room",
+        "room_type": "bed_room",
         "image_url": f"{S3_BASE}/small_square_room.jpg",
-        "text_prompt": "sofa. chair. table. cabinet. bed. shelf.",
         "box_threshold": 0.25,
         "text_threshold": 0.20,
         "min_score": None,
@@ -77,8 +78,8 @@ EXPERIMENTS = [
     },
     {
         "name": "office",
+        "room_type": "study_room",
         "image_url": f"{S3_BASE}/office.jpg",
-        "text_prompt": "desk. chair. monitor. computer. cabinet. bookshelf.",
         "box_threshold": 0.25,
         "text_threshold": 0.20,
         "min_score": None,
@@ -94,6 +95,7 @@ def build_config(base_config: dict, exp: dict) -> dict:
     cfg = json.loads(json.dumps(base_config))  # cheap deep copy
     cfg["image_url"] = exp["image_url"]
     cfg["root_dir"] = os.path.join(OUTPUT_ROOT, exp["name"])
+    cfg["room_type"] = exp["room_type"]
 
     # Use local pre-downloaded image for DINO/Inpaint stages (fast)
     # while keeping S3 URL for SAM/SAM3D external APIs
@@ -104,7 +106,7 @@ def build_config(base_config: dict, exp: dict) -> dict:
         cfg["local_image"] = exp["image_url"]  # fallback to S3
 
     # DINO overrides
-    cfg["dino"]["text_prompt"] = exp["text_prompt"]
+    cfg["dino"].pop("text_prompt", None)
     cfg["dino"]["box_threshold"] = exp["box_threshold"]
     cfg["dino"]["text_threshold"] = exp["text_threshold"]
 
@@ -139,7 +141,7 @@ def main():
         print(f"  EXPERIMENT {i}/{len(EXPERIMENTS)}: {name}")
         print(f"{'='*70}")
         print(f"  Image:    {exp['image_url']}")
-        print(f"  Prompt:   {exp['text_prompt']}")
+        print(f"  Prompt:   {prompt_for_room(exp['room_type'])}")
         print(f"  Box thr:  {exp['box_threshold']}")
         print(f"  Text thr: {exp['text_threshold']}")
         print(f"  Crop:     {exp['crop_size']}")

@@ -421,6 +421,7 @@ SCREENSHOT_VIEWS = {
 
 def layout_json_to_hull(
     data: dict,
+    room_height: Optional[float] = None,
     wall_color: np.ndarray = np.array([0.82, 0.86, 0.92]),
     floor_color: np.ndarray = np.array([0.70, 0.76, 0.84]),
     edge_color: np.ndarray = np.array([0.05, 0.05, 0.08]),
@@ -432,7 +433,7 @@ def layout_json_to_hull(
     wall+floor mesh in the create_3d_obj / Open3D frame (floor at
     ``y = -cameraHeight``) plus a LineSet of edges.
 
-    Metric sizes follow the JSON as-is (no 1.6 m rescale).
+    Metric sizes follow the JSON, optionally rescaled to ``room_height``.
     """
     import open3d as o3d
     from reposition.lgt_utils import json_frame_to_obj3d
@@ -442,13 +443,17 @@ def layout_json_to_hull(
     if len(points) < 3:
         raise ValueError("layout JSON needs at least 3 layoutPoints")
 
-    camera_height = float(data["cameraHeight"])
+    current_height = float(data["layoutHeight"])
+    metric_scale = float(room_height) / current_height if room_height else 1.0
+    raw_camera_height = float(data["cameraHeight"])
+    camera_height = raw_camera_height * metric_scale
     ceiling_h = float(
-        data.get("cameraCeilingHeight", float(data.get("layoutHeight", camera_height)) - camera_height)
-    )
+        data.get("cameraCeilingHeight", current_height - raw_camera_height)
+    ) * metric_scale
 
     def _corner(idx: int, json_y: float) -> np.ndarray:
         xyz = np.asarray(points[int(idx)]["xyz"], dtype=np.float64).reshape(3)
+        xyz *= metric_scale
         xyz[1] = json_y
         return json_frame_to_obj3d(xyz)
 
@@ -905,6 +910,7 @@ def create_coordinate_frame(size: float = 1.0) -> "open3d.geometry.TriangleMesh"
 def compare_layout_and_furniture(
     room_path: Optional[str] = None,
     layout_json: Optional[Union[str, dict]] = None,
+    room_height: Optional[float] = None,
     furniture_paths: Optional[List[str]] = None,
     room_color: np.ndarray = ROOM_DEFAULT_COLOR,
     furniture_colors: Optional[List[np.ndarray]] = None,
@@ -1018,7 +1024,7 @@ def compare_layout_and_furniture(
             print(f"\n{'='*60}")
             print(f"  加载 LGT-Net 布局 JSON 外壳")
             print(f"{'='*60}")
-        room_mesh, edges = layout_json_to_hull(layout_data)
+        room_mesh, edges = layout_json_to_hull(layout_data, room_height=room_height)
         geometries.append(room_mesh)
         geometries.append(edges)
     elif room_path is not None:
@@ -1253,6 +1259,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="LGT xyz2json 布局 JSON（优先于 --room_mesh，用于可看全屋的外壳）",
     )
     input_group.add_argument(
+        "--placements_json",
+        type=str,
+        default=None,
+        help="LGT 家具重定位 JSON；与 --layout_json、--furniture_dir 配合使用",
+    )
+    input_group.add_argument(
         "--furniture",
         type=str,
         nargs="*",
@@ -1281,6 +1293,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # ---- 显示选项 ----
     display_group = parser.add_argument_group("显示选项")
+    display_group.add_argument(
+        "--room_height",
+        type=float,
+        default=None,
+        help="用户指定的房间总高度（米）；布局 JSON 将等比缩放",
+    )
     display_group.add_argument(
         "--no_grid",
         action="store_true",
@@ -1320,6 +1338,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="禁止自动将家具对齐到地面",
     )
     display_group.add_argument(
+        "--show_rejected",
+        action="store_true",
+        help="同时显示被质量检查拒绝的家具",
+    )
+    display_group.add_argument(
         "--title",
         type=str,
         default="LGT-Net 房间结构 × SAM3D 家具模型 — 对比视图",
@@ -1354,6 +1377,37 @@ def main():
     args = parser.parse_args()
 
     verbose = not args.quiet
+
+    if args.placements_json:
+        if not args.furniture_dir:
+            parser.error("--placements_json requires --furniture_dir")
+        import json as _json
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from run_pipeline import visualize_placed_furniture
+
+        with open(args.placements_json, encoding="utf-8") as f:
+            payload = _json.load(f)
+        layout = None
+        if args.layout_json:
+            with open(args.layout_json, encoding="utf-8") as f:
+                layout = _json.load(f)
+        visualize_placed_furniture(
+            {
+                "placements": payload.get("placements", []) if isinstance(payload, dict) else payload,
+                "coordinates": layout,
+                "mesh_path": args.room_mesh,
+            },
+            furniture_dir=args.furniture_dir,
+            show=not args.no_show,
+            show_ground_grid=not args.no_grid,
+            show_coordinate_frame=not args.no_axis,
+            room_transparency=args.room_transparency,
+            save_screenshot=args.save_screenshot,
+            skip_rejected=not args.show_rejected,
+            verbose=verbose,
+        )
+        return
 
     # ---- 收集房间路径 ----
     room_path: Optional[str] = None
@@ -1427,6 +1481,7 @@ def main():
     compare_layout_and_furniture(
         room_path=room_path,
         layout_json=args.layout_json,
+        room_height=args.room_height,
         furniture_paths=furniture_paths if furniture_paths else None,
         show_ground_grid=not args.no_grid,
         ground_grid_size=args.grid_size,
