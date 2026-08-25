@@ -205,6 +205,10 @@ def predict(
     pre_processing: bool = Form(True),
     output_mesh: bool = Form(False),
     output_point_cloud: bool = Form(False),
+    room_height: Optional[float] = Form(None, gt=0),
+    room_type: Literal[
+        'living_room', 'study_room', 'kitchen', 'bed_room', 'bathroom'
+    ] = Form('living_room'),
     masks: Optional[List[UploadFile]] = File(None),
     settings: Settings = Depends(get_settings),
     model: torch.nn.Module = Depends(get_model),
@@ -245,23 +249,43 @@ def predict(
         dt['processed_xyz'] = post_process(tensor2np(dt['depth']), type_name=post_processing)
 
     output_xyz = dt['processed_xyz'][0] if 'processed_xyz' in dt else depth2xyz(tensor2np(dt['depth'][0]))
-    json_data = save_pred_json(output_xyz, tensor2np(dt['ratio'][0])[0])
+    json_data = save_pred_json(
+        output_xyz, tensor2np(dt['ratio'][0])[0], room_height=room_height
+    )
 
     placements = None
     placement_success = 0
     placement_failure = 0
     if mask_dir is not None:
-        placements, placement_success, placement_failure = placements_from_mask_dir(
+        placed = placements_from_mask_dir(
             mask_dir,
             json_data,
             depth=tensor2np(dt['depth'][0]),
             do_manhattan=pre_processing,
             vp_cache_path=vp_cache_path,
         )
+        # Host package returns (placements, success, failure); older images
+        # return placements only.
+        if isinstance(placed, tuple):
+            placements = placed[0]
+            if len(placed) > 1:
+                placement_success = int(placed[1])
+            if len(placed) > 2:
+                placement_failure = int(placed[2])
+        else:
+            placements = placed
+        if not placement_success and not placement_failure and placements:
+            placement_success = sum(
+                1
+                for p in placements
+                if p.get('translation') is not None and not p.get('error')
+            )
+            placement_failure = len(placements) - placement_success
         with open(os.path.join(job_dir, f'{job_id}_placements.json'), 'w', encoding='utf-8') as f:
             json.dump(
                 {
                     'job_id': job_id,
+                    'room_type': room_type,
                     'placements': placements,
                     'placement_success': placement_success,
                     'placement_failure': placement_failure,
@@ -281,7 +305,9 @@ def predict(
             length=settings.mesh_resolution if 'processed_xyz' in dt else None,
             visible=bool('processed_xyz' in dt),
         )
-        dt_layout_depth = layout2depth(dt_boundaries, show=False)
+        dt_layout_depth = layout2depth(
+            dt_boundaries, show=False, camera_height=json_data['cameraHeight']
+        )
         mesh_path = os.path.join(job_dir, f'{job_id}_3d{settings.mesh_format}')
         create_3d_obj(
             cv2.resize(img_array, dt_layout_depth.shape[::-1]),
@@ -299,6 +325,7 @@ def predict(
 
     return {
         'job_id': job_id,
+        'room_type': room_type,
         'coordinates': json_data,
         'placements': placements,
         'placement_success': placement_success,

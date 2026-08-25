@@ -6,7 +6,9 @@ import cv2
 import numpy as np
 
 
-def xyz2json(xyz, ratio, camera_height=1.6):
+def xyz2json(xyz, ratio, camera_height=1.6, room_height=None):
+    if room_height is not None:
+        camera_height = float(room_height) / (1.0 + float(ratio))
     xyz = xyz * camera_height
     ceiling_height = camera_height * ratio
     layout_height = camera_height + ceiling_height
@@ -53,4 +55,3 @@ def xyz2json(xyz, ratio, camera_height=1.6):
         data['layoutWalls']['walls'].append(tmp)
 
     return data
-
