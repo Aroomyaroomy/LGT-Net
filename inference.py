@@ -162,9 +162,9 @@ def show_alpha_floorplan(dt_xyz, side_l=512, border_color=None):
     return dt_floorplan
 
 
-def save_pred_json(xyz, ration, save_path=None):
+def save_pred_json(xyz, ration, save_path=None, room_height=None):
     # xyz[..., -1] = -xyz[..., -1]
-    json_data = xyz2json(xyz, ration)
+    json_data = xyz2json(xyz, ration, room_height=room_height)
     if save_path is not None:
         with open(save_path, 'w') as f:
             f.write(json.dumps(json_data, indent=4) + '\n')
