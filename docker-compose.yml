@@ -45,7 +45,7 @@ services:
       DINO_CKPT_DIR: /opt/groundingdino/weights/groundingdino_swint_ogc.pth
       DINO_OUTPUT_DIR: /data
       DINO_DEV_MODE: "true"
-      DINO_SECRET_KEY: dev-local-test-key-16chars
+      DINO_SECRET_KEY: ${GPU_SERVICES_API_KEY:?set GPU_SERVICES_API_KEY in .env}
     volumes:
       - ./GroundingDINO/weights:/opt/groundingdino/weights:ro  # model weights
       - dino_data:/data                                         # job output
@@ -74,7 +74,7 @@ services:
       LAMA_CONFIG: /opt/inpaint-anything/lama/configs/prediction/default.yaml
       LAMA_CKPT: /opt/inpaint-anything/pretrained_models/big-lama
       INPAINT_DEV_MODE: "true"
-      INPAINT_SECRET_KEY: dev-local-test-key-16chars
+      INPAINT_SECRET_KEY: ${GPU_SERVICES_API_KEY:?set GPU_SERVICES_API_KEY in .env}
       INPAINT_DEVICE: cuda
       INPAINT_OUTPUT_DIR: /data
     volumes:
@@ -102,7 +102,7 @@ services:
     environment:
       CUDA_VISIBLE_DEVICES: "0"
       LGT_DEV_MODE: "true"
-      LGT_SECRET_KEY: dev-local-test-key-16chars
+      LGT_SECRET_KEY: ${GPU_SERVICES_API_KEY:?set GPU_SERVICES_API_KEY in .env}
       LGT_CONFIG_DIR: src/config/zind.yaml
       LGT_OUTPUT_DIR: src/output
     volumes:
